@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- 应用图标（Explorer/任务栏/窗口） -->
+    <ApplicationIcon>Assets\logo.ico</ApplicationIcon>
+    <AssemblyName>TLSnipPin</AssemblyName>
+    <RootNamespace>SnipPin</RootNamespace>
+    <Version>0.1.0</Version>
+    <Description>TLSnipPin - Windows 截图贴图工具</Description>
+    <!-- 允许不安全代码（部分 Win32 互操作需要） -->
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <!-- 单文件发布相关 -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 图标作为嵌入资源（窗口 Icon 与托盘加载用） -->
+    <Resource Include="Assets\logo.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 依赖注入 / 日志 / 配置 -->
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="8.0.1" />
+    <!-- WPF 托盘图标（成熟开源组件） -->
+    <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="1.1.0" />
+  </ItemGroup>
+
+</Project>
