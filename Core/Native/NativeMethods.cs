@@ -72,6 +72,15 @@ internal static class NativeMethods
     /// <summary>SRCCOPY 光栅操作码</summary>
     internal const int SRCCOPY = 0x00CC0020;
 
+    /// <summary>创建空设备上下文（显示器 DC）</summary>
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
+    internal static extern IntPtr CreateDC(string? lpszDriver, string? lpszDevice, string? lpszOutput, IntPtr lpInitData);
+
+    /// <summary>将像素从一个 DC 拷贝到另一个 DC（支持跨不同 DPI 显示器的物理像素拷贝）</summary>
+    [DllImport("gdi32.dll", SetLastError = true)]
+    internal static extern bool StretchBlt(IntPtr hdcDest, int nXOriginDest, int nYOriginDest, int nWidthDest, int nHeightDest,
+        IntPtr hdcSrc, int nXOriginSrc, int nYOriginSrc, int nWidthSrc, int nHeightSrc, int dwRop);
+
     // ---------- 系统度量（虚拟屏幕范围） ----------
     [DllImport("user32.dll")]
     internal static extern int GetSystemMetrics(int nIndex);
@@ -89,6 +98,56 @@ internal static class NativeMethods
             GetSystemMetrics(SM_YVIRTUALSCREEN),
             GetSystemMetrics(SM_CXVIRTUALSCREEN),
             GetSystemMetrics(SM_CYVIRTUALSCREEN));
+    }
+
+    // ---------- DPI 感知 ----------
+    /// <summary>获取线程当前 DPI 上下文</summary>
+    [DllImport("user32.dll")]
+    internal static extern IntPtr GetThreadDpiAwarenessContext();
+
+    /// <summary>设置线程 DPI 上下文，返回旧值</summary>
+    [DllImport("user32.dll")]
+    internal static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
+    /// <summary>查询某 DPI 上下文在指定窗口下的 DPI（x/y 相同，返回 x）</summary>
+    [DllImport("user32.dll")]
+    internal static extern int GetDpiFromDpiAwarenessContext(IntPtr dpiContext);
+
+    // DPI_AWARENESS_CONTEXT 句柄常量
+    internal static readonly IntPtr DPI_AWARENESS_CONTEXT_UNAWARE = new(-1);
+    internal static readonly IntPtr DPI_AWARENESS_CONTEXT_SYSTEM_AWARE = new(-2);
+    internal static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE = new(-3);
+    internal static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new(-4);
+
+    // ---------- 显示器枚举（逐屏捕获用） ----------
+    [DllImport("user32.dll")]
+    internal static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr lprcClip, MonitorEnumProc lpfnEnum, IntPtr dwData);
+
+    internal delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData);
+
+    [DllImport("shcore.dll")]
+    internal static extern int GetDpiForMonitor(IntPtr hmonitor, int dpiType, out uint dpiX, out uint dpiY);
+
+    /// <summary>MDT_EFFECTIVE_DPI</summary>
+    internal const int MDT_EFFECTIVE_DPI = 0;
+
+    /// <summary>显示器信息：句柄 + 物理像素矩形 + 有效 DPI</summary>
+    public readonly record struct MonitorInfo(IntPtr Handle, System.Windows.Rect Bounds, double Dpi);
+
+    /// <summary>枚举所有显示器，返回各自的物理像素边界与 DPI（Per-Monitor 适配基础）</summary>
+    public static List<MonitorInfo> GetMonitors()
+    {
+        var list = new List<MonitorInfo>();
+        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (IntPtr hMon, IntPtr hdc, ref RECT r, IntPtr data) =>
+        {
+            double dpi = 96.0;
+            if (GetDpiForMonitor(hMon, MDT_EFFECTIVE_DPI, out uint dx, out uint _) == 0 && dx > 0)
+                dpi = dx;
+            list.Add(new MonitorInfo(hMon,
+                new System.Windows.Rect(r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top), dpi));
+            return true;
+        }, IntPtr.Zero);
+        return list;
     }
 
     // ---------- 窗口枚举（智能窗口识别用） ----------

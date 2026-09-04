@@ -13,6 +13,7 @@ namespace SnipPin.Core.Services;
 public class PinService : IPinService
 {
     private readonly ConfigService _config;
+    private readonly HistoryService _history; // 贴图标注完成时生成截图历史
     private readonly List<PinWindow> _pins = new();
 
     private static readonly string SessionDir = Path.Combine(Program.DataDir, "session");
@@ -20,16 +21,17 @@ public class PinService : IPinService
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    public PinService(ConfigService config)
+    public PinService(ConfigService config, HistoryService history)
     {
         _config = config;
+        _history = history;
     }
 
     public IReadOnlyList<PinWindow> Pins => _pins;
 
     public void Pin(BitmapSource image, Point? position = null)
     {
-        var win = new PinWindow(image, _config.Config.Pin);
+        var win = new PinWindow(image, _config.Config.Pin, _history);
 
         if (position.HasValue)
         {
@@ -87,7 +89,7 @@ public class PinService : IPinService
                 img.EndInit();
                 img.Freeze();
 
-                var win = new PinWindow(img, _config.Config.Pin);
+                var win = new PinWindow(img, _config.Config.Pin, _history);
                 win.RestoreState(st);
                 win.Left = st.Left;
                 win.Top = st.Top;
@@ -121,7 +123,8 @@ public class PinService : IPinService
             {
                 var win = _pins[i];
                 var file = $"pin_{i}.png";
-                if (!SavePng(win.ImageSource, Path.Combine(SessionDir, file)))
+                // 保存合成后的图片（含标注），确保标注随会话保留
+                if (!SavePng(win.GetCompositedImage(), Path.Combine(SessionDir, file)))
                     continue;
 
                 states.Add(new PinState

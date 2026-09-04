@@ -34,6 +34,8 @@ public class AnnotationToolbar : Border
 
     public event Action? UndoRequested;
     public event Action? RedoRequested;
+    /// <summary>删除当前选中的标注元素</summary>
+    public event Action? DeleteRequested;
     public event Action? PinRequested;
     public event Action? SaveRequested;
     public event Action? CopyRequested;
@@ -43,6 +45,11 @@ public class AnnotationToolbar : Border
     private AnnotationTool _currentTool = AnnotationTool.Rectangle;
     private Color _currentColor = Color.FromRgb(0xE5, 0x39, 0x35); // 默认红
     private double _currentThickness = 2;
+
+    // 输出按钮显隐：贴图内嵌标注时隐藏"钉住/保存/复制"（由贴图右键菜单负责），
+    // 但保留 ✕（作废）/✓（写入）作为标注会话的明确出口。
+    private readonly bool _showOutputActions;
+    private readonly bool _showConfirmCancel;
 
     // 预设颜色
     private static readonly Color[] PresetColors =
@@ -57,8 +64,11 @@ public class AnnotationToolbar : Border
         Colors.White,
     };
 
-    public AnnotationToolbar()
+    public AnnotationToolbar(bool showOutputActions = true, bool showConfirmCancel = true)
     {
+        _showOutputActions = showOutputActions;
+        _showConfirmCancel = showConfirmCancel;
+
         // 外观：圆角深色底 + 阴影
         Background = new SolidColorBrush(Color.FromRgb(0x2B, 0x2B, 0x2B));
         CornerRadius = new CornerRadius(8);
@@ -101,20 +111,29 @@ public class AnnotationToolbar : Border
 
         panel.Children.Add(Divider());
 
-        // ---- 撤销/重做 ----
+        // ---- 撤销/重做/删除选中 ----
         panel.Children.Add(ActionButton("↶", "撤销", () => UndoRequested?.Invoke()));
         panel.Children.Add(ActionButton("↷", "重做", () => RedoRequested?.Invoke()));
-
-        panel.Children.Add(Divider());
+        panel.Children.Add(ActionButton("🗑", "删除选中元素", () => DeleteRequested?.Invoke()));
 
         // ---- 输出动作 ----
-        panel.Children.Add(ActionButton("📌", "钉住", () => PinRequested?.Invoke()));
-        panel.Children.Add(ActionButton("💾", "保存", () => SaveRequested?.Invoke()));
-        panel.Children.Add(ActionButton("📋", "复制", () => CopyRequested?.Invoke()));
-        panel.Children.Add(ActionButton("✕", "取消", () => CancelRequested?.Invoke()));
-        var confirm = ActionButton("✓", "完成", () => ConfirmRequested?.Invoke());
-        confirm.Background = new SolidColorBrush(Color.FromRgb(0x2E, 0x7D, 0x32));
-        panel.Children.Add(confirm);
+        if (_showOutputActions)
+        {
+            panel.Children.Add(Divider());
+            panel.Children.Add(ActionButton("📌", "钉住", () => PinRequested?.Invoke()));
+            panel.Children.Add(ActionButton("💾", "保存", () => SaveRequested?.Invoke()));
+            panel.Children.Add(ActionButton("📋", "复制", () => CopyRequested?.Invoke()));
+        }
+
+        // ---- ✕ 作废 / ✓ 写入 ----
+        if (_showConfirmCancel)
+        {
+            panel.Children.Add(Divider());
+            panel.Children.Add(ActionButton("✕", "作废本次标注", () => CancelRequested?.Invoke()));
+            var confirm = ActionButton("✓", "写入图片", () => ConfirmRequested?.Invoke());
+            confirm.Background = new SolidColorBrush(Color.FromRgb(0x2E, 0x7D, 0x32));
+            panel.Children.Add(confirm);
+        }
 
         return panel;
     }
@@ -127,6 +146,9 @@ public class AnnotationToolbar : Border
         if (tool == _currentTool) HighlightTool(btn);
         return btn;
     }
+
+    /// <summary>程序化选中工具（初始化默认工具用）</summary>
+    public void SelectTool(AnnotationTool tool) => SetTool(tool);
 
     private void SetTool(AnnotationTool tool)
     {

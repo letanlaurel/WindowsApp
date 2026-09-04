@@ -18,6 +18,7 @@ public class AnnotationEditorWindow : Window
 
     private readonly Canvas _layer;      // 标注画布（底图 + 标注）
     private readonly AnnotationToolbar _toolbar;
+    private Border? _frame;               // 选区边框
     private TextBox? _textInput;          // 文字输入框
     private Border? _previewRect;         // 马赛克拖拽预览框
 
@@ -32,6 +33,13 @@ public class AnnotationEditorWindow : Window
     private Annotation? _selected;       // 选中的标注
     private Vector _moveTotal;           // 本次移动累计位移（用于生成撤销命令）
     private int _numberCounter = 1;
+
+    // 小选区时工具条移到画面下方的扩展区
+    private bool _toolbarDocked;         // 工具条是否停靠在画面下方
+    private double _imgW;                // 图像宽度（物理像素）
+    private double _imgH;                // 图像高度
+    private double _measuredTbHeight;    // 探测到的工具条自然高度
+    private const double ToolbarGap = 8; // 工具条与画面之间的间距
 
     /// <summary>用户确认完成（参数为合成后的最终图片）</summary>
     public event Action<BitmapSource>? Confirmed;
@@ -55,8 +63,10 @@ public class AnnotationEditorWindow : Window
         Topmost = true;
         ShowInTaskbar = false;
         ResizeMode = ResizeMode.NoResize;
-        Width = baseImage.PixelWidth;
-        Height = baseImage.PixelHeight;
+        _imgW = baseImage.PixelWidth;
+        _imgH = baseImage.PixelHeight;
+        Width = _imgW;
+        Height = _imgH;
 
         // ---- 布局：Grid 承载画布 + 悬浮工具条 ----
         var root = new Grid();
@@ -72,7 +82,7 @@ public class AnnotationEditorWindow : Window
         root.Children.Add(_layer);
 
         // 选区边框：截图常与背景（白网页/文档）融为一体看不清范围，加紫色描边 + 轻阴影突出边界
-        var frame = new Border
+        _frame = new Border
         {
             Width = baseImage.PixelWidth,
             Height = baseImage.PixelHeight,
@@ -87,9 +97,9 @@ public class AnnotationEditorWindow : Window
                 Color = Color.FromRgb(0x4A, 0x55, 0x78),
             },
         };
-        root.Children.Add(frame);
+        root.Children.Add(_frame);
 
-        // 工具条（悬浮在底部居中）
+        // 工具条：默认悬浮在画面底部居中；若选区太窄放不下，则停靠到画面下方扩展区
         _toolbar = new AnnotationToolbar
         {
             HorizontalAlignment = HorizontalAlignment.Center,
@@ -100,6 +110,9 @@ public class AnnotationEditorWindow : Window
 
         Content = root;
 
+        // 布局完成后测量工具条宽度，放不下则改用停靠布局
+        Loaded += (_, _) => ProbeToolbarHeight(root);
+
         // ---- 事件订阅 ----
         HookToolbar();
         HookMouse();
@@ -109,6 +122,65 @@ public class AnnotationEditorWindow : Window
 
         Focusable = true;
         Loaded += (_, _) => Keyboard.Focus(this);
+    }
+
+    // ---------------- 工具条布局 ----------------
+    /// <summary>
+    /// 第一次 Loaded 时窗口高 = 图像高，工具条被 VerticalAlignment=Bottom 约束，
+    /// 测不到自然高度。这里先用无限高度探测其真实高度，再交给 <see cref="ArrangeToolbar"/>。
+    /// </summary>
+    private void ProbeToolbarHeight(Grid root)
+    {
+        _toolbar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        _measuredTbHeight = _toolbar.DesiredSize.Height;
+        ArrangeToolbar(root);
+    }
+
+    /// <summary>
+    /// 决定工具条摆放：默认悬浮在画面底部居中；当选区宽度放不下整条工具条时，
+    /// 改为停靠在画面下方扩展区（窗口随之加高），避免被窗口裁掉。
+    /// 再根据屏幕边界微调窗口位置，防止工具条/画面超出可视区。
+    /// </summary>
+    private void ArrangeToolbar(Grid root)
+    {
+        // 探测自然宽度（高度已在 ProbeToolbarHeight 中测好）
+        _toolbar.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        double tbW = _toolbar.DesiredSize.Width;
+        double tbH = _measuredTbHeight;
+
+        // 留一点余量：选区宽度不足时认为放不下
+        _toolbarDocked = _imgW < tbW + 8;
+
+        if (_toolbarDocked)
+        {
+            // 扩展窗口：宽取画面与工具条的较大者，高 = 画面 + 间距 + 工具条
+            Width = Math.Max(_imgW, tbW);
+            Height = _imgH + ToolbarGap + tbH;
+
+            // 画面与边框整体移到顶部居中（高度仍是图像尺寸，下方留白给工具条）
+            _layer.HorizontalAlignment = HorizontalAlignment.Center;
+            _layer.VerticalAlignment = VerticalAlignment.Top;
+            if (_frame != null)
+            {
+                _frame.HorizontalAlignment = HorizontalAlignment.Center;
+                _frame.VerticalAlignment = VerticalAlignment.Top;
+            }
+
+            // 工具条改为停靠在窗口底部居中
+            _toolbar.HorizontalAlignment = HorizontalAlignment.Center;
+            _toolbar.VerticalAlignment = VerticalAlignment.Bottom;
+            _toolbar.Margin = new Thickness(0);
+        }
+
+        // ---- 屏幕边界微调：防止扩展/悬浮后超出可视区 ----
+        var wa = SystemParameters.WorkArea;
+        // 左/右：水平方向若超出工作区，平移回来
+        if (Left < wa.Left) Left = wa.Left;
+        if (Left + Width > wa.Right) Left = Math.Max(wa.Left, wa.Right - Width);
+        // 下方：若底部超出，优先上移窗口；仍超出（图像本身较高）则贴工作区顶部
+        if (Top + Height > wa.Bottom)
+            Top = Math.Max(wa.Top, wa.Bottom - Height);
+        if (Top < wa.Top) Top = wa.Top;
     }
 
     // ---------------- 工具条事件 ----------------
@@ -125,6 +197,7 @@ public class AnnotationEditorWindow : Window
 
         _toolbar.UndoRequested += () => _history.Undo();
         _toolbar.RedoRequested += () => _history.Redo();
+        _toolbar.DeleteRequested += DeleteSelected;
 
         _toolbar.ConfirmRequested += () => Finish(Confirmed);
         _toolbar.PinRequested += () => Finish(PinRequested, keepOpen: false);
@@ -145,11 +218,7 @@ public class AnnotationEditorWindow : Window
             }
             else if (e.Key == Key.Z && Keyboard.Modifiers.HasFlag(ModifierKeys.Control)) _history.Undo();
             else if (e.Key == Key.Y && Keyboard.Modifiers.HasFlag(ModifierKeys.Control)) _history.Redo();
-            else if (e.Key == Key.Delete && _selected != null)
-            {
-                _history.Do(new DeleteAnnotationCommand(_annotations, _selected));
-                _selected = null;
-            }
+            else if (e.Key == Key.Delete) DeleteSelected();
             else if (e.Key == Key.Enter && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
                 Finish(Confirmed);
         };
@@ -286,7 +355,8 @@ public class AnnotationEditorWindow : Window
         _layer.ReleaseMouseCapture();
         Cursor = Cursors.Cross;
 
-        // 结束移动：先还原到起点，再用命令重放整段位移（使移动可撤销）
+        // 结束移动：先还原到起点，再用命令重放整段位移（使移动可撤销）。
+        // 选中态保留到点击空白/切换工具/删除，方便松手后继续 Delete 或再次拖动
         if (_selected != null)
         {
             if (_moveTotal.Length > 1)
@@ -296,7 +366,6 @@ public class AnnotationEditorWindow : Window
                 item.Translate(-total); // 还原
                 _history.Do(new MoveAnnotationCommand(item, total));
             }
-            _selected = null;
             Cursor = _tool == AnnotationTool.None ? Cursors.Arrow : Cursors.Cross;
             Redraw();
             return;
@@ -420,6 +489,16 @@ public class AnnotationEditorWindow : Window
             if (b.Contains(pos)) return _annotations[i];
         }
         return null;
+    }
+
+    // ---------------- 删除选中 ----------------
+    /// <summary>删除当前选中的标注（工具栏 🗑 按钮与 Delete 键共用）</summary>
+    private void DeleteSelected()
+    {
+        if (_selected == null) return;
+        _history.Do(new DeleteAnnotationCommand(_annotations, _selected));
+        _selected = null;
+        Redraw();
     }
 
     // ---------------- 重绘 ----------------

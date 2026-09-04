@@ -33,35 +33,70 @@ public class CaptureService : ICaptureService
 
     public void StartRegionCapture()
     {
-        // 1. 抓取整个虚拟屏幕作为背景
-        var screen = ScreenCapturer.CaptureVirtualScreen();
+        // 1. 逐屏捕获：每屏单独抓物理像素并按该屏 DPI 打包（Per-Monitor 适配的关键）
+        var snaps = ScreenCapturer.CapturePerScreen();
+        if (snaps.Count == 0) return;
+
+        // 合成一张整屏物理像素图，用于框选后裁剪输出（清晰、不缩放）
+        var fullPhysical = ScreenCapturer.ComposeFullPhysical(snaps);
         var (vx, vy, _, _) = Native.NativeMethods.GetVirtualScreen();
 
-        // 2. 弹出框选遮罩窗，用户框选后进入标注编辑
-        //    遮罩透明度与窗口吸附开关来自配置
-        var overlay = new CaptureOverlayWindow(
-            screen, new Point(vx, vy),
-            _config.Config.Capture.MaskOpacity,
-            _config.Config.Capture.WindowSnap);
+        // 2. 每屏各弹一个 overlay 遮罩（各自落在所在屏、用所在屏缩放），任一屏框选完成即汇总
+        var overlays = new List<CaptureOverlayWindow>();
+        bool handled = false;
 
-        overlay.RegionSelected += rect =>
+        foreach (var snap in snaps)
         {
-            // rect 为屏幕坐标（物理像素），换算到位图内坐标
-            var local = new Int32Rect(
-                (int)(rect.X - vx),
-                (int)(rect.Y - vy),
-                (int)rect.Width,
-                (int)rect.Height);
+            var dipBounds = new Rect(
+                snap.Origin.X / snap.Scale, snap.Origin.Y / snap.Scale,
+                snap.Bitmap.PixelWidth / snap.Scale, snap.Bitmap.PixelHeight / snap.Scale);
 
-            var cropped = ScreenCapturer.Crop(screen, local);
+            var overlay = new CaptureOverlayWindow(
+                snap.Bitmap, dipBounds, snap.Scale,
+                _config.Config.Capture.MaskOpacity,
+                _config.Config.Capture.WindowSnap);
 
-            // 3. 打开标注编辑器（编辑完成后由用户选择输出方式）
-            OpenEditor(cropped, new Point(rect.X, rect.Y));
-            _logger.LogInformation("区域截图完成：{W}x{H} @({X},{Y})", rect.Width, rect.Height, rect.X, rect.Y);
-        };
+            overlay.RegionSelected += virtDip =>
+            {
+                if (handled) return;
+                handled = true;
 
-        overlay.Cancelled += () => _logger.LogInformation("截图已取消");
-        overlay.ShowOverlay();
+                // 虚拟屏 DIP → 物理像素（乘以该屏缩放系数）
+                double s = overlay.Scale;
+                var local = new Int32Rect(
+                    (int)Math.Round(virtDip.X * s) - vx,
+                    (int)Math.Round(virtDip.Y * s) - vy,
+                    (int)Math.Round(virtDip.Width * s),
+                    (int)Math.Round(virtDip.Height * s));
+
+                var cropped = ScreenCapturer.Crop(fullPhysical, local);
+                CloseAll();
+
+                // 3. 打开标注编辑器（编辑完成后由用户选择输出方式），位置用物理像素
+                OpenEditor(cropped, new Point(virtDip.X * s, virtDip.Y * s));
+                _logger.LogInformation("区域截图完成：{W}x{H}", local.Width, local.Height);
+            };
+
+            overlay.Cancelled += () =>
+            {
+                if (handled) return;
+                handled = true;
+                CloseAll();
+                _logger.LogInformation("截图已取消");
+            };
+
+            overlays.Add(overlay);
+        }
+
+        foreach (var o in overlays) o.ShowOverlay();
+
+        void CloseAll()
+        {
+            foreach (var o in overlays)
+            {
+                try { o.Close(); } catch { /* 已关闭则忽略 */ }
+            }
+        }
     }
 
     /// <summary>打开标注编辑窗，并接好输出动作</summary>
