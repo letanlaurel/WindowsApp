@@ -7,7 +7,7 @@ using SnipPin.Core.Configuration;
 namespace SnipPin.Core.Services;
 
 /// <summary>
-/// 截图服务：协调一次完整截图流程（遮罩 -> 框选 -> 标注 -> 输出）。
+/// 截图服务：协调一次完整截图流程（遮罩 → 框选 → 就地标注 → 工具栏输出）。
 /// </summary>
 public class CaptureService : ICaptureService
 {
@@ -41,7 +41,7 @@ public class CaptureService : ICaptureService
         var fullPhysical = ScreenCapturer.ComposeFullPhysical(snaps);
         var (vx, vy, _, _) = Native.NativeMethods.GetVirtualScreen();
 
-        // 2. 每屏各弹一个 overlay 遮罩（各自落在所在屏、用所在屏缩放），任一屏框选完成即汇总
+        // 2. 每屏各弹一个 overlay 遮罩（各自落在所在屏、用所在屏缩放），任一屏输出即汇总
         var overlays = new List<CaptureOverlayWindow>();
         bool handled = false;
 
@@ -56,7 +56,8 @@ public class CaptureService : ICaptureService
                 _config.Config.Capture.MaskOpacity,
                 _config.Config.Capture.WindowSnap);
 
-            overlay.RegionSelected += virtDip =>
+            // 用户在 overlay 内完成标注并选择输出动作
+            overlay.Committed += (virtDip, annotations, action) =>
             {
                 if (handled) return;
                 handled = true;
@@ -69,12 +70,35 @@ public class CaptureService : ICaptureService
                     (int)Math.Round(virtDip.Width * s),
                     (int)Math.Round(virtDip.Height * s));
 
+                // 裁剪选区并合成标注（标注坐标已是选区局部物理像素，与裁剪图 1:1）
                 var cropped = ScreenCapturer.Crop(fullPhysical, local);
+                var img = annotations.Count > 0
+                    ? AnnotationCompositor.Render(cropped, annotations)
+                    : cropped;
                 CloseAll();
 
-                // 3. 打开标注编辑器（编辑完成后由用户选择输出方式），位置用物理像素
-                OpenEditor(cropped, new Point(virtDip.X * s, virtDip.Y * s));
-                _logger.LogInformation("区域截图完成：{W}x{H}", local.Width, local.Height);
+                var screenPos = new Point(virtDip.X * s, virtDip.Y * s);
+                switch (action)
+                {
+                    case CaptureOverlayWindow.CaptureOutputAction.Confirm:
+                        _storage.CopyToClipboard(img);
+                        _history.Add(img, "完成");
+                        _logger.LogInformation("已复制到剪贴板");
+                        break;
+                    case CaptureOverlayWindow.CaptureOutputAction.Pin:
+                        _pinService.Pin(img, screenPos);
+                        _history.Add(img, "钉住");
+                        break;
+                    case CaptureOverlayWindow.CaptureOutputAction.Save:
+                        var path = _storage.SaveToFile(img);
+                        _history.Add(img, "保存", path);
+                        _logger.LogInformation("已保存：{Path}", path);
+                        break;
+                    case CaptureOverlayWindow.CaptureOutputAction.Copy:
+                        _storage.CopyToClipboard(img);
+                        break;
+                }
+                _logger.LogInformation("区域截图输出：{W}x{H} 动作={Action}", local.Width, local.Height, action);
             };
 
             overlay.Cancelled += () =>
@@ -97,38 +121,6 @@ public class CaptureService : ICaptureService
                 try { o.Close(); } catch { /* 已关闭则忽略 */ }
             }
         }
-    }
-
-    /// <summary>打开标注编辑窗，并接好输出动作</summary>
-    private void OpenEditor(BitmapSource cropped, Point screenPos)
-    {
-        var editor = new AnnotationEditorWindow(cropped)
-        {
-            Left = screenPos.X,
-            Top = screenPos.Y,
-        };
-
-        editor.Confirmed += img =>
-        {
-            _storage.CopyToClipboard(img);
-            _history.Add(img, "完成");
-            _logger.LogInformation("已复制到剪贴板");
-        };
-        editor.PinRequested += img =>
-        {
-            _pinService.Pin(img, screenPos);
-            _history.Add(img, "钉住");
-        };
-        editor.SaveRequested += img =>
-        {
-            var path = _storage.SaveToFile(img);
-            _history.Add(img, "保存", path);
-            _logger.LogInformation("已保存：{Path}", path);
-        };
-        editor.CopyRequested += img => _storage.CopyToClipboard(img);
-        editor.Cancelled += () => _logger.LogInformation("标注编辑已取消");
-
-        editor.Show();
     }
 
     public void CaptureFullScreen()
