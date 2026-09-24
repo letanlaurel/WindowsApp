@@ -7,7 +7,7 @@ using SnipPin.Core.Configuration;
 namespace SnipPin.Settings;
 
 /// <summary>
-/// 设置窗体：常规 / 热键 / 保存 / 截图 / 贴图 五组配置的编辑。
+/// 设置窗体：常规 / 热键 / 保存 / 历史 / 剪贴板 / 截图 / 贴图 各组配置的编辑。
 /// 保存后写回 ConfigService 并触发 SettingsSaved（由 MainWindow 重新注册热键等）。
 /// </summary>
 public class SettingsWindow : Window
@@ -24,6 +24,9 @@ public class SettingsWindow : Window
     private TextBox _hkPinClipboard = null!;
     private TextBox _hkFullScreen = null!;
     private TextBox _hkTogglePins = null!;
+    private TextBox _hkClipboard = null!;
+    private CheckBox _clipboardEnabled = null!;
+    private TextBox _clipboardLimit = null!;
     private TextBox _saveDir = null!;
     private TextBox _nameTemplate = null!;
     private ComboBox _format = null!;
@@ -67,6 +70,7 @@ public class SettingsWindow : Window
         panel.Children.Add(BuildHotkeyGroup());
         panel.Children.Add(BuildSaveGroup());
         panel.Children.Add(BuildHistoryGroup());
+        panel.Children.Add(BuildClipboardGroup());
         panel.Children.Add(BuildCaptureGroup());
         panel.Children.Add(BuildPinGroup());
 
@@ -113,12 +117,30 @@ public class SettingsWindow : Window
         _hkPinClipboard = HotkeyBox(hk.PinClipboard);
         _hkFullScreen = HotkeyBox(hk.FullScreen);
         _hkTogglePins = HotkeyBox(hk.TogglePins);
+        _hkClipboard = HotkeyBox(_config.Config.Clipboard.Hotkey);
 
         return Group("热键（点击输入框后按下新快捷键，Esc 清空）",
             Row("区域截图", _hkCapture),
             Row("钉住剪贴板图片", _hkPinClipboard),
             Row("全屏截图", _hkFullScreen),
-            Row("显示/隐藏贴图", _hkTogglePins));
+            Row("显示/隐藏贴图", _hkTogglePins),
+            Row("剪贴板历史弹窗", _hkClipboard));
+    }
+
+    // ---------------- 剪贴板历史 ----------------
+    private UIElement BuildClipboardGroup()
+    {
+        var cb = _config.Config.Clipboard;
+        _clipboardEnabled = new CheckBox
+        {
+            Content = "启用剪贴板历史记录（文本 / 图片 / 文件）",
+            IsChecked = cb.Enabled,
+        };
+        _clipboardLimit = new TextBox { Text = cb.MaxEntries.ToString(), Width = 120, ToolTip = "活跃条目上限，超过后最旧的归档到压缩包（0=永不归档）" };
+
+        return Group("剪贴板历史",
+            _clipboardEnabled,
+            Row("记录上限", _clipboardLimit));
     }
 
     // ---------------- 保存 ----------------
@@ -245,6 +267,13 @@ public class SettingsWindow : Window
         c.Hotkeys.PinClipboard = _hkPinClipboard.Text.Trim();
         c.Hotkeys.FullScreen = _hkFullScreen.Text.Trim();
         c.Hotkeys.TogglePins = _hkTogglePins.Text.Trim();
+
+        // 剪贴板历史：热键 + 启用开关 + 记录上限（解析失败回退 500）
+        c.Clipboard.Hotkey = _hkClipboard.Text.Trim();
+        c.Clipboard.Enabled = _clipboardEnabled.IsChecked == true;
+        if (!int.TryParse(_clipboardLimit.Text.Trim(), out int clipLimit))
+            clipLimit = 500;
+        c.Clipboard.MaxEntries = Math.Clamp(clipLimit, 0, 1_000_000);
 
         c.Save.Directory = _saveDir.Text.Trim();
         c.Save.NameTemplate = _nameTemplate.Text.Trim();

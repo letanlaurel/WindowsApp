@@ -62,6 +62,7 @@ public static class Program
                 services.AddSingleton<IPinService, PinService>();
                 services.AddSingleton<IStorageService, StorageService>();
                 services.AddSingleton<HistoryService>();
+                services.AddSingleton<ClipboardService>();
             })
             .Build();
 

@@ -12,6 +12,7 @@ public class AppConfig
     public CaptureConfig Capture { get; set; } = new();
     public PinConfig Pin { get; set; } = new();
     public HistoryConfig History { get; set; } = new();
+    public ClipboardConfig Clipboard { get; set; } = new();
 }
 
 public class GeneralConfig
@@ -76,6 +77,19 @@ public class HistoryConfig
         Path.Combine(Program.DataDir, "history");
     /// <summary>活跃条目上限：超过后最旧的归档到压缩包（不删除）；设为 0 表示永不归档</summary>
     public int ActiveLimit { get; set; } = 200;
+}
+
+public class ClipboardConfig
+{
+    /// <summary>是否启用剪贴板记录</summary>
+    public bool Enabled { get; set; } = true;
+    /// <summary>弹出剪贴板历史的热键</summary>
+    public string Hotkey { get; set; } = "Ctrl+Alt+V";
+    /// <summary>活跃条目上限：超过后最旧的归档到压缩包（不删除）；设为 0 表示永不归档</summary>
+    public int MaxEntries { get; set; } = 500;
+    /// <summary>剪贴板数据目录（索引 + 图片 + 归档压缩包）</summary>
+    public string Directory { get; set; } =
+        Path.Combine(Program.DataDir, "clipboard");
 }
 
 /// <summary>

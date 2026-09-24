@@ -39,6 +39,8 @@ public class HotkeyService : IHotkeyService
         Register(hk.PinClipboard, "pinClipboard");
         Register(hk.FullScreen, "fullScreen");
         Register(hk.TogglePins, "togglePins");
+        // 剪贴板历史弹窗（配置在 Clipboard 节，默认 Ctrl+Alt+V）
+        Register(_config.Config.Clipboard.Hotkey, "clipboardHistory");
     }
 
     public void UnregisterAll()

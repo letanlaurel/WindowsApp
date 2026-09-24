@@ -27,8 +27,10 @@ public class MainWindow : Window
     private IStorageService _storage = null!;
     private ConfigService _config = null!;
     private HistoryService _historySvc = null!;
+    private ClipboardService _clipboard = null!;
 
     private History.HistoryWindow? _historyWin;
+    private ClipboardHistory.ClipboardWindow? _clipboardWin;
 
     public MainWindow()
     {
@@ -50,6 +52,7 @@ public class MainWindow : Window
         _storage = services.GetRequiredService<IStorageService>();
         _config = services.GetRequiredService<ConfigService>();
         _historySvc = services.GetRequiredService<HistoryService>();
+        _clipboard = services.GetRequiredService<ClipboardService>();
 
         // 建立 Win32 消息钩子以接收 WM_HOTKEY
         var helper = new WindowInteropHelper(this);
@@ -71,6 +74,9 @@ public class MainWindow : Window
                 BalloonIcon.Warning);
         }
         _hotkeys.RegisterAll(helper.Handle);
+
+        // 挂载系统剪贴板监听（复用本窗口句柄接收 WM_CLIPBOARDUPDATE）
+        _clipboard.Start(_hwnd);
 
         // 恢复上次的贴图会话
         _pin.RestoreSession();
@@ -114,6 +120,19 @@ public class MainWindow : Window
             }
             handled = true;
         }
+        else if (msg == WindowMessages.WM_CLIPBOARDUPDATE)
+        {
+            // 剪贴板内容变化：转发给剪贴板历史服务（内部有防抖与异常兜底）
+            try
+            {
+                _clipboard.OnClipboardUpdate();
+            }
+            catch (Exception ex)
+            {
+                Program.LogError("剪贴板监听", ex);
+            }
+            handled = true;
+        }
         return IntPtr.Zero;
     }
 
@@ -128,8 +147,30 @@ public class MainWindow : Window
                 case "fullScreen": _capture.CaptureFullScreen(); break;
                 case "pinClipboard": _capture.PinFromClipboard(); break;
                 case "togglePins": _pin.ToggleAll(); break;
+                case "clipboardHistory": ShowClipboardPopup(); break;
             }
         });
+    }
+
+    /// <summary>
+    /// 在鼠标附近弹出剪贴板历史（Ctrl+Alt+V）。
+    /// 弹出前记录当前前台窗口，选中条目后恢复焦点并模拟 Ctrl+V 完成粘贴。
+    /// </summary>
+    private void ShowClipboardPopup()
+    {
+        if (_clipboardWin != null)
+        {
+            // 已打开则直接激活（同 Win+V 行为）
+            _clipboardWin.Activate();
+            return;
+        }
+
+        // 弹窗显示前保存粘贴目标窗口（此时前台仍是用户原来的应用）
+        var target = NativeMethods.GetForegroundWindow();
+        _clipboardWin = new ClipboardHistory.ClipboardWindow(_clipboard, target);
+        _clipboardWin.Closed += (_, _) => _clipboardWin = null;
+        _clipboardWin.Show();
+        _clipboardWin.Activate();
     }
 
     // ---------- 系统托盘 ----------
@@ -224,6 +265,7 @@ public class MainWindow : Window
         // 覆盖非托盘退出路径（如注销、任务管理器结束等触发 Closing 的场景）
         _pin?.PersistSession();
         _hotkeys?.UnregisterAll();
+        _clipboard?.Stop();
         _tray?.Dispose();
         base.OnClosing(e);
     }

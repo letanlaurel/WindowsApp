@@ -28,6 +28,7 @@ public enum HotkeyModifiers : uint
 public static class WindowMessages
 {
     public const int WM_HOTKEY = 0x0312;
+    public const int WM_CLIPBOARDUPDATE = 0x031D;
 }
 
 /// <summary>
@@ -149,6 +150,55 @@ internal static class NativeMethods
         }, IntPtr.Zero);
         return list;
     }
+
+    // ---------- 剪贴板监听 / 鼠标 / 前台窗口 / 按键模拟（剪贴板历史用） ----------
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern bool AddClipboardFormatListener(IntPtr hwnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern bool RemoveClipboardFormatListener(IntPtr hwnd);
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct POINT
+    {
+        public int X, Y;
+    }
+
+    /// <summary>获取鼠标物理屏幕坐标</summary>
+    [DllImport("user32.dll")]
+    internal static extern bool GetCursorPos(out POINT lpPoint);
+
+    /// <summary>获取当前前台窗口</summary>
+    [DllImport("user32.dll")]
+    internal static extern IntPtr GetForegroundWindow();
+
+    /// <summary>把窗口设为前台（粘贴前恢复焦点用）</summary>
+    [DllImport("user32.dll")]
+    internal static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    /// <summary>获取窗口物理屏幕矩形</summary>
+    [DllImport("user32.dll")]
+    internal static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    /// <summary>物理像素定位窗口（弹窗跟随鼠标，绕过 DPI 换算）</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+        int x, int y, int cx, int cy, uint uFlags);
+
+    internal static readonly IntPtr HWND_TOPMOST = new(-1);
+    internal const uint SWP_NOSIZE = 0x0001;
+    internal const uint SWP_NOACTIVATE = 0x0010;
+
+    /// <summary>keybd_event 按键标志：抬起</summary>
+    internal const uint KEYEVENTF_KEYUP = 0x0002;
+
+    /// <summary>虚拟键：左/右 Ctrl 与 Alt（模拟 Ctrl+V 及释放残留修饰键）</summary>
+    internal const byte VK_CONTROL = 0x11;
+    internal const byte VK_MENU = 0x12;
+
+    /// <summary>模拟一次按键（粘贴用：Ctrl+V）</summary>
+    [DllImport("user32.dll")]
+    internal static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
     // ---------- 窗口枚举（智能窗口识别用） ----------
     internal delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
