@@ -304,14 +304,35 @@ public class ClipboardService
         var list = Entries.ToList();
         if (list.Remove(entry))
         {
-            if (entry.Type == ClipboardEntryType.Image && !string.IsNullOrEmpty(entry.FileName))
-                TryDeleteFile(entry.FileName);
-            if (!string.IsNullOrEmpty(entry.TextFileName))
-                TryDeleteFile(entry.TextFileName);
+            DeleteEntryFiles(entry);
             Entries = list;
             Save();
             Changed?.Invoke();
         }
+    }
+
+    /// <summary>批量删除多条记录（含图片 / 大文本 txt 文件），只保存 / 通知一次</summary>
+    public void DeleteRange(IEnumerable<ClipboardEntry> entries)
+    {
+        var set = entries.ToHashSet();
+        var list = Entries.ToList();
+        int removed = list.RemoveAll(e => set.Contains(e));
+        if (removed == 0) return;
+
+        foreach (var entry in set)
+            DeleteEntryFiles(entry);
+
+        Entries = list;
+        Save();
+        Changed?.Invoke();
+    }
+
+    /// <summary>清理条目关联的落盘文件（图片 PNG / 大文本 txt）</summary>
+    private void DeleteEntryFiles(ClipboardEntry entry)
+    {
+        if (entry.Type == ClipboardEntryType.Image)
+            TryDeleteFile(entry.FileName);
+        TryDeleteFile(entry.TextFileName);
     }
 
     /// <summary>把条目移到列表顶部（选中粘贴后调用，不触发重新记录）</summary>

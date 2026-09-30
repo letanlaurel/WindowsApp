@@ -20,7 +20,7 @@ namespace SnipPin.History;
 /// - 无边框圆角窗口 + 自定义标题栏（最小化/最大化/关闭）
 /// - 半透明毛玻璃质感工具栏：截图/剪贴板/全屏（快捷键胶囊随配置刷新）、多选、设置、清空
 /// - 卡片流：圆角缩略图 + 时间/分辨率 + 已钉住徽标，悬停上浮与快捷操作
-/// - 多选模式：批量删除所选；清空：全部 / 指定日期之前
+/// - 多选模式：批量删除所选、批量导出为 zip 压缩包；清空：全部 / 指定日期之前
 /// </summary>
 public class HistoryWindow : Window
 {
@@ -48,6 +48,7 @@ public class HistoryWindow : Window
 
     private Button _multiSelectBtn = null!;
     private Button _deleteSelectedBtn = null!;
+    private Button _exportSelectedBtn = null!;
     private TextBlock _selectedInfo = null!;
     private Button _openArchiveBtn = null!;
     private Grid _root = null!;
@@ -375,7 +376,7 @@ public class HistoryWindow : Window
             Padding = new Thickness(19, 0, 19, 0),
             Background = Brushes.Transparent,
             Cursor = Cursors.Hand,
-            ToolTip = "进入多选模式，批量删除（Esc 退出）",
+            ToolTip = "进入多选模式，批量删除 / 导出（Esc 退出）",
             Template = ButtonTemplate(9, "#EFEDFB", "#E4E1F7"),
             Content = ActionContent(Icons.CheckSquare, IconStroke, "多选", TextPrimary),
         };
@@ -390,6 +391,20 @@ public class HistoryWindow : Window
             Margin = new Thickness(0, 0, 8, 0),
             Visibility = Visibility.Collapsed,
         };
+
+        _exportSelectedBtn = new Button
+        {
+            Height = 32,
+            Margin = new Thickness(0, 0, 6, 0),
+            Padding = new Thickness(19, 0, 19, 0),
+            Background = Brushes.Transparent,
+            Cursor = Cursors.Hand,
+            ToolTip = "把所选截图打包导出为 zip 压缩包",
+            Template = ButtonTemplate(9, "#EFEDFB", "#E4E1F7"),
+            Content = ActionContent(Icons.Download, IconStroke, "导出所选", TextPrimary),
+            Visibility = Visibility.Collapsed,
+        };
+        _exportSelectedBtn.Click += (_, _) => ExportSelected();
 
         _deleteSelectedBtn = new Button
         {
@@ -446,6 +461,7 @@ public class HistoryWindow : Window
         right.Children.Add(_openArchiveBtn);
         right.Children.Add(_multiSelectBtn);
         right.Children.Add(_selectedInfo);
+        right.Children.Add(_exportSelectedBtn);
         right.Children.Add(_deleteSelectedBtn);
         right.Children.Add(settingsBtn);
         right.Children.Add(clearBtn);
@@ -932,6 +948,7 @@ public class HistoryWindow : Window
             : ActionContent(Icons.CheckSquare, IconStroke, "多选", TextPrimary);
         _deleteSelectedBtn.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
         _deleteSelectedBtn.Content = ActionContent(Icons.Trash, Frozen(0xD6, 0x45, 0x62), "删除所选", Frozen(0xD6, 0x45, 0x62));
+        _exportSelectedBtn.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
 
         if (on)
         {
@@ -979,6 +996,7 @@ public class HistoryWindow : Window
         _selectedInfo.Text = $"已选 {_selectedIds.Count} 项";
         _selectedInfo.Visibility = _multiSelect ? Visibility.Visible : Visibility.Collapsed;
         _deleteSelectedBtn.IsEnabled = _selectedIds.Count > 0;
+        _exportSelectedBtn.IsEnabled = _selectedIds.Count > 0;
     }
 
     private void DeleteSelected()
@@ -992,6 +1010,42 @@ public class HistoryWindow : Window
         // 逐条删除（Changed 事件触发整体重建，删除后选中集自然清空）
         foreach (var entry in _history.Entries.Where(e => _selectedIds.Contains(e.Id)).ToList())
             _history.Delete(entry);
+    }
+
+    /// <summary>把所选截图打包导出为 zip 压缩包（后台打包，完成后提示路径）</summary>
+    private async void ExportSelected()
+    {
+        var entries = _history.Entries.Where(e => _selectedIds.Contains(e.Id)).ToList();
+        if (entries.Count == 0) return;
+
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = "导出所选截图",
+            Filter = "Zip 压缩包 (*.zip)|*.zip",
+            FileName = $"截图导出_{DateTime.Now:yyyyMMdd_HHmmss}.zip",
+        };
+        if (dlg.ShowDialog(this) != true) return;
+
+        try
+        {
+            IsEnabled = false; // 打包期间防误操作
+            int exported = await Task.Run(() => _history.ExportZip(entries, dlg.FileName));
+            MessageBox.Show(this,
+                exported == entries.Count
+                    ? $"已导出 {exported} 张截图：\n{dlg.FileName}"
+                    : $"已导出 {exported} / {entries.Count} 张（其余图片文件已丢失）：\n{dlg.FileName}",
+                "导出完成", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            Program.LogError("批量导出截图", ex);
+            MessageBox.Show(this, $"导出失败：\n{ex.Message}", "批量导出",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            IsEnabled = true;
+        }
     }
 
     // ---------------- 清空 ----------------

@@ -223,6 +223,28 @@ public class HistoryService
         catch { }
     }
 
+    /// <summary>
+    /// 把指定条目的图片打包导出为 zip 压缩包。
+    /// 压缩包内以"时间_Id.png"命名（与归档一致，文件名排序即时间排序）。
+    /// 返回实际导出的条数（图片文件已丢失的条目跳过）；失败抛异常，由调用方提示。
+    /// </summary>
+    public int ExportZip(IReadOnlyList<HistoryEntry> entries, string zipPath)
+    {
+        int exported = 0;
+        using (var zip = ZipFile.Open(zipPath, ZipArchiveMode.Create))
+        {
+            foreach (var e in entries)
+            {
+                var src = Path.Combine(_currentDir, e.FileName);
+                if (!File.Exists(src)) continue;
+                var entryName = $"{e.CreatedAt:yyyyMMdd_HHmmss}_{e.Id}.png";
+                zip.CreateEntryFromFile(src, entryName, CompressionLevel.Optimal);
+                exported++;
+            }
+        }
+        return exported;
+    }
+
     // ---------------- 归档 ----------------
     /// <summary>超过活跃上限时，把最旧的图片追加进 archive.zip 并从活跃列表移出</summary>
     private void ArchiveOverflow()
