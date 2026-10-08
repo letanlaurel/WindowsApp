@@ -13,6 +13,7 @@ public class AppConfig
     public PinConfig Pin { get; set; } = new();
     public HistoryConfig History { get; set; } = new();
     public ClipboardConfig Clipboard { get; set; } = new();
+    public RecordingConfig Recording { get; set; } = new();
 }
 
 public class GeneralConfig
@@ -35,6 +36,10 @@ public class HotkeyConfig
     public string FullScreen { get; set; } = "F3";
     /// <summary>显示/隐藏所有贴图</summary>
     public string TogglePins { get; set; } = "F4";
+    /// <summary>开始/停止录制</summary>
+    public string RecordToggle { get; set; } = "Ctrl+Alt+R";
+    /// <summary>暂停/恢复录制</summary>
+    public string RecordPause { get; set; } = "Ctrl+Alt+P";
 }
 
 public class SaveConfig
@@ -75,8 +80,10 @@ public class HistoryConfig
     /// <summary>历史数据目录（图片 + 索引 + 归档压缩包）</summary>
     public string Directory { get; set; } =
         Path.Combine(Program.DataDir, "history");
-    /// <summary>活跃条目上限：超过后最旧的归档到压缩包（不删除）；设为 0 表示永不归档</summary>
-    public int ActiveLimit { get; set; } = 200;
+    /// <summary>活跃条目上限：超过后最旧的按月归档到 archive_YYYY-MM.zip（不删除）；设为 0 表示永不归档</summary>
+    public int ActiveLimit { get; set; } = 500;
+    /// <summary>归档缓冲条数：超上限后先攒这么多条，攒满一次性批量归档（0 = 每超 1 条立即归档）</summary>
+    public int ArchiveBuffer { get; set; } = 10;
 }
 
 public class ClipboardConfig
@@ -90,6 +97,25 @@ public class ClipboardConfig
     /// <summary>剪贴板数据目录（索引 + 图片 + 归档压缩包）</summary>
     public string Directory { get; set; } =
         Path.Combine(Program.DataDir, "clipboard");
+}
+
+public class RecordingConfig
+{
+    /// <summary>录屏数据目录（MP4 + 缩略图 + 索引）</summary>
+    public string Directory { get; set; } =
+        Path.Combine(Program.DataDir, "recordings");
+    /// <summary>目标帧率（5-60，超出范围自动收敛）</summary>
+    public int Fps { get; set; } = 30;
+    /// <summary>H.264 平均码率（kbps）；0 = 按分辨率自动估算</summary>
+    public int BitrateKbps { get; set; } = 0;
+    /// <summary>是否把鼠标光标画进录屏画面</summary>
+    public bool DrawCursor { get; set; } = true;
+    /// <summary>录屏音源：none=不录声音 / system=系统声音 / microphone=麦克风</summary>
+    public string AudioSource { get; set; } = "system";
+    /// <summary>活跃条目上限：超过后最旧的按月归档到 archive_YYYY-MM.zip（不删除）；设为 0 表示永不归档</summary>
+    public int ActiveLimit { get; set; } = 50;
+    /// <summary>归档缓冲条数：超上限后先攒这么多条，攒满一次性批量归档（0 = 每超 1 条立即归档）</summary>
+    public int ArchiveBuffer { get; set; } = 5;
 }
 
 /// <summary>

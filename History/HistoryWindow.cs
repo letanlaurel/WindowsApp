@@ -12,13 +12,16 @@ using System.Windows.Shapes;
 using System.Windows.Shell;
 using SnipPin.Core.Configuration;
 using SnipPin.Core.Services;
+using SnipPin.Recording;
+using static SnipPin.History.UiKit;
 
 namespace SnipPin.History;
 
 /// <summary>
-/// 截图历史主窗口（柔和现代视觉）：
+/// 应用主窗口（柔和现代视觉）：
 /// - 无边框圆角窗口 + 自定义标题栏（最小化/最大化/关闭）
-/// - 半透明毛玻璃质感工具栏：截图/剪贴板/全屏（快捷键胶囊随配置刷新）、多选、设置、清空
+/// - 标签页：截图 / 录屏（录屏列表由 RecordingsPanel 承载）
+/// - 截图视图：半透明毛玻璃质感工具栏（截图/剪贴板/全屏（快捷键胶囊随配置刷新）、多选、设置、清空）
 /// - 卡片流：圆角缩略图 + 时间/分辨率 + 已钉住徽标，悬停上浮与快捷操作
 /// - 多选模式：批量删除所选、批量导出为 zip 压缩包；清空：全部 / 指定日期之前
 /// </summary>
@@ -28,6 +31,8 @@ public class HistoryWindow : Window
     private readonly IPinService _pin;
     private readonly IStorageService _storage;
     private readonly ConfigService _config;
+    private readonly RecordingHistoryService _recordings;
+    private readonly RecordingService _recorder;
 
     private TextBlock _countText = null!;
     private WrapPanel _itemsPanel = null!;
@@ -59,13 +64,13 @@ public class HistoryWindow : Window
     private TextBlock _kbdClipboard = null!;
     private TextBlock _kbdFullScreen = null!;
 
-    private const double CardWidth = 216;
-    private const double ThumbHeight = 124;
-
-    // ---- 字体 ----
-    private const string UiFont = "Segoe UI Variable Text, Segoe UI";
-    private const string TitleFont = "Segoe UI Variable Display, Segoe UI";
-    private const string KbdFont = "Cascadia Mono, Consolas";
+    // 标签页（截图 / 录屏）
+    private Grid _shotsView = null!;
+    private RecordingsPanel _recPanel = null!;
+    private Button _tabShots = null!;
+    private TextBlock _tabShotsLabel = null!;
+    private Button _tabRecs = null!;
+    private TextBlock _tabRecsLabel = null!;
 
     // ---- 配色（柔和浅色 + 薰衣草紫强调） ----
     private static readonly Brush Accent = Frozen(0x7C, 0x6A, 0xF0);        // 强调紫
@@ -91,18 +96,28 @@ public class HistoryWindow : Window
     /// <summary>工具栏截图/剪贴板/全屏按钮触发（参数为动作名，与热键分发一致）</summary>
     public event Action<string>? ActionRequested;
 
+    /// <summary>录屏面板点击「录制窗口」，请求打开录制目标选择器</summary>
+    public event Action? RecordRequested;
+
+    /// <summary>录屏设置已保存（转发自录屏面板，由主窗体重注册热键/迁移目录）</summary>
+    public event Action? RecordingSettingsSaved;
+
     public HistoryWindow(
         HistoryService history,
         IPinService pin,
         IStorageService storage,
-        ConfigService config)
+        ConfigService config,
+        RecordingHistoryService recordings,
+        RecordingService recorder)
     {
         _history = history;
         _pin = pin;
         _storage = storage;
         _config = config;
+        _recordings = recordings;
+        _recorder = recorder;
 
-        Title = "TLSnipPin 截图历史";
+        Title = "TLSnipPin";
         Icon = Program.LoadAppIcon();
         // 宽度恰好容纳 4 张卡片：4×(卡片216+右距18) + 左边距22 + 右边距14 + 垂直滚动条约18 = 990
         Width = 990;
@@ -137,6 +152,10 @@ public class HistoryWindow : Window
         _history.Changed += RebuildItems;
         RebuildItems();
         RefreshHotkeyText();
+
+        // 窗口重新激活时刷新鼠标悬停状态：失活期间（如打开设置窗）鼠标已移走，
+        // 按钮的 IsMouseOver 会冻结在 true，悬停背景残留在按钮上不消失
+        Activated += (_, _) => UiKit.RefreshMouseHover();
     }
 
     private UIElement BuildContent()
@@ -157,21 +176,120 @@ public class HistoryWindow : Window
         TextElement.SetForeground(_root, TextPrimary);
 
         _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(44) });    // 标题栏
-        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });       // 工具栏
-        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });       // 搜索栏
-        _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // 列表
+        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });       // 标签栏（截图 / 录屏）
+        _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // 内容
 
         var titleBar = BuildTitleBar();
         Grid.SetRow(titleBar, 0);
         _root.Children.Add(titleBar);
 
+        var tabs = BuildTabStrip();
+        Grid.SetRow(tabs, 1);
+        _root.Children.Add(tabs);
+
+        // 内容区：截图视图与录屏视图叠放，按标签切换
+        var content = new Grid();
+        _shotsView = BuildShotsView();
+        _recPanel = new RecordingsPanel(_recordings, _recorder, _config);
+        _recPanel.RecordRequested += () => RecordRequested?.Invoke();
+        _recPanel.RecordingSettingsSaved += () => RecordingSettingsSaved?.Invoke();
+        content.Children.Add(_shotsView);
+        content.Children.Add(_recPanel);
+        Grid.SetRow(content, 2);
+        _root.Children.Add(content);
+
+        SwitchTab(ShotsTab);
+
+        // 最大化时无边框窗口会溢出屏幕约 7px，加内边距补偿；同时切换还原图标
+        StateChanged += (_, _) =>
+        {
+            bool max = WindowState == WindowState.Maximized;
+            _root.Margin = max ? new Thickness(7) : default;
+            _maxIcon.Data = Geometry.Parse(max ? Icons.Restore : Icons.Maximize);
+        };
+
+        return _root;
+    }
+
+    // ---------------- 标签栏（截图 / 录屏） ----------------
+    private const string ShotsTab = "shots";
+    private const string RecsTab = "recs";
+
+    /// <summary>标签栏：两个胶囊按钮，选中态白底主文字</summary>
+    private UIElement BuildTabStrip()
+    {
+        var bar = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(22, 8, 22, 10),
+        };
+
+        (_tabShots, _tabShotsLabel) = TabButton(Icons.Camera, "截图");
+        (_tabRecs, _tabRecsLabel) = TabButton(Icons.Video, "录屏");
+        _tabShots.Click += (_, _) => SwitchTab(ShotsTab);
+        _tabRecs.Click += (_, _) => SwitchTab(RecsTab);
+
+        bar.Children.Add(_tabShots);
+        bar.Children.Add(_tabRecs);
+        return bar;
+    }
+
+    private (Button Btn, TextBlock Label) TabButton(string icon, string label)
+    {
+        var text = new TextBlock
+        {
+            Text = label,
+            FontSize = 12.5,
+            FontWeight = FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(7, 0, 0, 0),
+        };
+        var host = new StackPanel { Orientation = Orientation.Horizontal };
+        var tabIcon = LineIcon(icon, 14, IconStroke);
+        tabIcon.VerticalAlignment = VerticalAlignment.Center; // 与文字垂直居中，避免轻微下沉
+        host.Children.Add(tabIcon);
+        host.Children.Add(text);
+
+        var btn = new Button
+        {
+            Height = 30,
+            Padding = new Thickness(12, 0, 14, 0),
+            Background = Brushes.Transparent,
+            Cursor = Cursors.Hand,
+            Template = ButtonTemplate(8, "#EFEDFB", "#E4E1F7"),
+            Content = host,
+        };
+        return (btn, text);
+    }
+
+    /// <summary>切换标签：文字颜色与内容视图联动（按钮无底色，选中态仅以文字深浅区分）</summary>
+    private void SwitchTab(string tab)
+    {
+        bool shots = tab == ShotsTab;
+        _tabShotsLabel.Foreground = shots ? TextPrimary : TextSecondary;
+        _tabRecsLabel.Foreground = shots ? TextSecondary : TextPrimary;
+
+        _shotsView.Visibility = shots ? Visibility.Visible : Visibility.Collapsed;
+        _recPanel.Visibility = shots ? Visibility.Collapsed : Visibility.Visible;
+        if (!shots)
+            _recPanel.Refresh();
+    }
+
+    /// <summary>截图视图：工具栏 + 日期搜索栏 + 卡片列表</summary>
+    private Grid BuildShotsView()
+    {
+        var view = new Grid();
+        view.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });       // 工具栏
+        view.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });       // 搜索栏
+        view.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // 列表
+
         var toolbar = BuildToolbar();
-        Grid.SetRow(toolbar, 1);
-        _root.Children.Add(toolbar);
+        Grid.SetRow(toolbar, 0);
+        view.Children.Add(toolbar);
 
         var searchBar = BuildSearchBar();
-        Grid.SetRow(searchBar, 2);
-        _root.Children.Add(searchBar);
+        Grid.SetRow(searchBar, 1);
+        view.Children.Add(searchBar);
 
         // ---- 列表区 ----
         var grid = new Grid();
@@ -192,18 +310,10 @@ public class HistoryWindow : Window
             PanningMode = PanningMode.VerticalOnly,
             Content = grid,
         };
-        Grid.SetRow(scroll, 3);
-        _root.Children.Add(scroll);
+        Grid.SetRow(scroll, 2);
+        view.Children.Add(scroll);
 
-        // 最大化时无边框窗口会溢出屏幕约 7px，加内边距补偿；同时切换还原图标
-        StateChanged += (_, _) =>
-        {
-            bool max = WindowState == WindowState.Maximized;
-            _root.Margin = max ? new Thickness(7) : default;
-            _maxIcon.Data = Geometry.Parse(max ? Icons.Restore : Icons.Maximize);
-        };
-
-        return _root;
+        return view;
     }
 
     // ---------------- 标题栏 ----------------
@@ -225,7 +335,7 @@ public class HistoryWindow : Window
             });
         left.Children.Add(new TextBlock
         {
-            Text = "TLSnipPin 截图历史",
+            Text = "TLSnipPin",
             FontFamily = new FontFamily(TitleFont),
             FontSize = 12.5,
             FontWeight = FontWeights.SemiBold,
@@ -590,7 +700,7 @@ public class HistoryWindow : Window
         return dp;
     }
 
-    /// <summary>应用日期范围筛选</summary>
+    /// <summary>应用日期范围筛选（覆盖到的归档月份先解压到列表）</summary>
     private void ApplySearch()
     {
         var s = _searchStart?.SelectedDate;
@@ -608,10 +718,12 @@ public class HistoryWindow : Window
         _searching = true;
         _searchRangeFrom = from;
         _searchRangeTo = to;
+        // 搜索命中历史月份：解压对应归档包合入列表（压缩包保留）
+        _history.EnsureArchivesExtracted(from, to);
         RebuildItems();
     }
 
-    /// <summary>清除筛选，恢复显示全部</summary>
+    /// <summary>清除筛选，恢复显示全部（丢弃解压的归档数据，压缩包保留）</summary>
     private void ClearSearch()
     {
         _searching = false;
@@ -619,6 +731,7 @@ public class HistoryWindow : Window
         _searchRangeTo = default;
         if (_searchStart != null) _searchStart.SelectedDate = null;
         if (_searchEnd != null) _searchEnd.SelectedDate = null;
+        _history.DiscardExtracted();
         RebuildItems();
     }
 
@@ -1248,73 +1361,8 @@ public class HistoryWindow : Window
     }
 
     // ---------------- 控件工厂与样式 ----------------
-
-    /// <summary>线条图标（24 基准几何，统一圆角圆帽描边）</summary>
-    private static Viewbox LineIcon(string data, double size, Brush stroke, double thickness = 1.7) => new()
-    {
-        Width = size,
-        Height = size,
-        Stretch = Stretch.Uniform,
-        Child = new Path
-        {
-            Data = Geometry.Parse(data),
-            Stroke = stroke,
-            StrokeThickness = thickness,
-            StrokeStartLineCap = PenLineCap.Round,
-            StrokeEndLineCap = PenLineCap.Round,
-            StrokeLineJoin = PenLineJoin.Round,
-            Fill = Brushes.Transparent,
-        },
-    };
-
-    /// <summary>按钮内容：图标 + 文字（+ 可选快捷键胶囊）</summary>
-    private static StackPanel ActionContent(
-        string icon, Brush iconStroke, string label, Brush labelBrush, UIElement? kbd = null)
-    {
-        var sp = new StackPanel { Orientation = Orientation.Horizontal };
-        sp.Children.Add(LineIcon(icon, 15, iconStroke));
-        sp.Children.Add(new TextBlock
-        {
-            Text = label,
-            FontSize = 12.5,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = labelBrush,
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(8, 0, 0, 0), // 图标与文字间距
-        });
-        if (kbd != null)
-            sp.Children.Add(kbd);
-        return sp;
-    }
-
-    /// <summary>快捷键胶囊：小号等宽字，深浅两套配色</summary>
-    private static (Border Host, TextBlock Label) KbdBadge(bool primary)
-    {
-        var label = new TextBlock
-        {
-            FontSize = 9.5,
-            FontFamily = new FontFamily(KbdFont),
-        };
-        var host = new Border
-        {
-            CornerRadius = new CornerRadius(5),
-            Padding = new Thickness(5, 2, 5, 2),
-            Margin = new Thickness(7, 0, 1, 0),
-            VerticalAlignment = VerticalAlignment.Center,
-            Child = label,
-        };
-        if (primary)
-        {
-            host.Background = new SolidColorBrush(Color.FromArgb(0x3D, 0xFF, 0xFF, 0xFF));
-            label.Foreground = Frozen(0xEC, 0xE9, 0xFD);
-        }
-        else
-        {
-            host.Background = Frozen(0xEC, 0xEE, 0xF6);
-            label.Foreground = Frozen(0x82, 0x89, 0x9E);
-        }
-        return (host, label);
-    }
+    // 通用工厂（LineIcon / ActionContent / KbdBadge / MiniIconButton / ButtonTemplate /
+    // AnimateDouble / Icons）已抽到 UiKit，经 using static 引入；此处仅保留本窗专用样式。
 
     /// <summary>标题栏窗口控制按钮</summary>
     private (Button Btn, Path Icon) WindowButton(string iconData, string tooltip, bool hoverRed = false)
@@ -1333,112 +1381,7 @@ public class HistoryWindow : Window
                 : ButtonTemplate(7, "#E9EBF2", "#DDE0EA"),
         };
         WindowChrome.SetIsHitTestVisibleInChrome(btn, true);
-        return (btn, (Path)icon.Child);
-    }
-
-    /// <summary>卡片悬停操作小按钮：半透明白圆角底</summary>
-    private static Button MiniIconButton(string iconData, string tooltip) => new()
-    {
-        Width = 28,
-        Height = 26,
-        Padding = new Thickness(0),
-        Margin = new Thickness(2, 0, 0, 0),
-        Background = new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF)),
-        Cursor = Cursors.Hand,
-        ToolTip = tooltip,
-        Template = ButtonTemplate(8, "#F2FFFFFF", "#FFFFFF"),
-        Content = LineIcon(iconData, 13, Frozen(0x4A, 0x52, 0x65)),
-    };
-
-    /// <summary>
-    /// 圆角按钮模板：常态仅显示内容（透明）；悬停/按下时覆盖层淡入着色，松开后淡出恢复透明。
-    /// 关键：ContentPresenter 绑定 Padding，否则内边距被模板吞掉、文字紧贴边框。
-    /// </summary>
-    private static ControlTemplate ButtonTemplate(int radius, string hover, string pressed)
-    {
-        var hov = ParseBrush(hover);
-        var pre = ParseBrush(pressed);
-        var tt = new ControlTemplate(typeof(Button));
-
-        // 边框层（背景/描边）。描边固定为 0（去边框），仅保留背景与圆角
-        var bg = new FrameworkElementFactory(typeof(Border));
-        bg.Name = "bg";
-        bg.SetValue(Border.CornerRadiusProperty, new CornerRadius(radius));
-        bg.SetBinding(Border.BackgroundProperty, new Binding("Background") { RelativeSource = RelativeSource.TemplatedParent });
-        bg.SetValue(Border.BorderThicknessProperty, new Thickness(0));
-        bg.SetValue(UIElement.SnapsToDevicePixelsProperty, true);
-
-        // Grid 根：叠加 边框层 + 覆盖层 + 内容（Border 仅单子元素，需用 Grid 承载多层）
-        var rootGrid = new FrameworkElementFactory(typeof(Grid));
-        rootGrid.AppendChild(bg);
-
-        // 悬停/按下覆盖层（透明渐变淡入，边框色圆角与外层一致）
-        var overlay = new FrameworkElementFactory(typeof(Border));
-        overlay.Name = "overlay";
-        overlay.SetValue(Border.CornerRadiusProperty, new CornerRadius(radius));
-        overlay.SetValue(Border.BackgroundProperty, hov);
-        overlay.SetValue(UIElement.OpacityProperty, 0.0);
-        rootGrid.AppendChild(overlay);
-
-        var cp = new FrameworkElementFactory(typeof(ContentPresenter));
-        cp.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-        cp.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
-        cp.SetValue(ContentPresenter.RecognizesAccessKeyProperty, false);
-        // 绑定按钮 Padding —— 否则模板根撑满、内容居中，内边距完全不生效
-        cp.SetBinding(FrameworkElement.MarginProperty,
-            new Binding("Padding") { RelativeSource = RelativeSource.TemplatedParent });
-        rootGrid.AppendChild(cp);
-
-        tt.VisualTree = rootGrid;
-
-        // 悬停淡入 / 移出淡出
-        var enter = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
-        enter.EnterActions.Add(FadeBgAction("overlay", 1.0));
-        enter.ExitActions.Add(FadeBgAction("overlay", 0.0));
-        tt.Triggers.Add(enter);
-
-        // 按下时换成更深色；松开（IsPressed=false）时恢复悬停色并随淡出隐藏
-        var press = new Trigger { Property = ButtonBase.IsPressedProperty, Value = true };
-        press.EnterActions.Add(FadeBgAction("overlay", 1.0, pre));
-        press.ExitActions.Add(FadeBgAction("overlay", 1.0, hov)); // 松开后立刻换回悬停色，避免残留深色
-        tt.Triggers.Add(press);
-
-        var disabled = new Trigger { Property = UIElement.IsEnabledProperty, Value = false };
-        disabled.Setters.Add(new Setter(UIElement.OpacityProperty, 0.45));
-        tt.Triggers.Add(disabled);
-
-        return tt;
-    }
-
-    private static BeginStoryboard FadeBgAction(string target, double to, Brush? brush = null)
-    {
-        var board = new Storyboard();
-        var anim = new DoubleAnimation(to, TimeSpan.FromMilliseconds(140))
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-        };
-        Storyboard.SetTargetName(anim, target);
-        Storyboard.SetTargetProperty(anim, new PropertyPath("Opacity"));
-        board.Children.Add(anim);
-        if (brush != null)
-        {
-            // 按下瞬间切换到更深色（Duration=0 立即生效）
-            var colorAnim = new ObjectAnimationUsingKeyFrames
-            {
-                KeyFrames = { new DiscreteObjectKeyFrame(brush, KeyTime.FromTimeSpan(TimeSpan.Zero)) },
-            };
-            Storyboard.SetTargetName(colorAnim, target);
-            Storyboard.SetTargetProperty(colorAnim, new PropertyPath("Background"));
-            board.Children.Add(colorAnim);
-        }
-        return new BeginStoryboard { Storyboard = board };
-    }
-
-    private static Brush ParseBrush(string hex)
-    {
-        var brush = (Brush)new BrushConverter().ConvertFromString(hex);
-        brush.Freeze();
-        return brush;
+        return (btn, IconPath(icon));
     }
 
     /// <summary>清空菜单：白色圆角浮层 + 轻阴影</summary>
@@ -1490,48 +1433,4 @@ public class HistoryWindow : Window
             </Setter>
         </Style>
         """);
-
-    // ---------------- 动画辅助 ----------------
-    /// <summary>对可动画属性做缓动过渡（卡片上浮/阴影加深）</summary>
-    private static void AnimateDouble(Animatable target, DependencyProperty property, double to, int ms = 150)
-    {
-        var anim = new DoubleAnimation(to, TimeSpan.FromMilliseconds(ms))
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-        };
-        target.BeginAnimation(property, anim);
-    }
-
-    /// <summary>24×24 基准的圆角线条图标几何数据</summary>
-    private static class Icons
-    {
-        public const string Camera =
-            "M7.2 6l1.3-1.9h6.9L16.7 6h.8A2.5 2.5 0 0 1 20 8.5v7A2.5 2.5 0 0 1 17.5 18h-11A2.5 2.5 0 0 1 4 15.5v-7A2.5 2.5 0 0 1 6.5 6z M12 14.8a2.8 2.8 0 1 0 0-5.6 2.8 2.8 0 0 0 0 5.6z";
-        public const string Clipboard =
-            "M9 4h6v2.2H9z M16.3 6h1.2A2.5 2.5 0 0 1 20 8.5v9A2.5 2.5 0 0 1 17.5 20h-11A2.5 2.5 0 0 1 4 17.5v-9A2.5 2.5 0 0 1 6.5 6h1.2 M9 11.5h6 M9 15h4";
-        public const string Monitor =
-            "M5 7A2.5 2.5 0 0 1 7.5 4.5h9A2.5 2.5 0 0 1 19 7v6.5a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 5 13.5z M9.5 20h5 M12 16v4";
-        public const string CheckSquare =
-            "M7.5 4.5h9A3 3 0 0 1 19.5 7.5v9a3 3 0 0 1-3 3h-9a3 3 0 0 1-3-3v-9a3 3 0 0 1 3-3z M8.7 12.2l2.3 2.3 4.5-5";
-        public const string Sliders =
-            "M5 4.5v5 M5 13.5v6 M12 4.5v9 M12 17.5v2 M19 4.5v2 M19 10.5v9 M3 9.5h4 M10 13.5h4 M17 6.5h4";
-        public const string Trash =
-            "M4.5 7h15 M9.5 7V5.5A1.5 1.5 0 0 1 11 4h2a1.5 1.5 0 0 1 1.5 1.5V7 M7.5 7l.7 11.1A2 2 0 0 0 10.2 20h3.6a2 2 0 0 0 2-1.9L16.5 7 M10 10.5v6 M14 10.5v6";
-        public const string Archive =
-            "M4.5 4.5h15V8h-15z M6 8h12v9.5A2.5 2.5 0 0 1 15.5 20h-7A2.5 2.5 0 0 1 6 17.5z M10 12h4";
-        public const string Pin =
-            "M9.2 4.2h5.6l-.6 5.9 2.9 3H6.9l2.9-3z M12 13.1V20";
-        public const string Download =
-            "M12 4v10.5 M7.8 10.3 12 14.5l4.2-4.2 M5 19.5h14";
-        public const string Image =
-            "M6 5.5h12A1.5 1.5 0 0 1 19.5 7v10a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 17V7A1.5 1.5 0 0 1 6 5.5z M4.5 15.5l4.2-4.2 3.3 3.3 2.6-2.6 4.9 4.9 M15.6 9.5h.01";
-        public const string Calendar =
-            "M7.5 3.5v3 M16.5 3.5v3 M4.5 9h15 M6 5.5h12A1.5 1.5 0 0 1 19.5 7v11a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 18V7A1.5 1.5 0 0 1 6 5.5z";
-        public const string ChevronDown = "M6.5 9.5l5 5 5-5";
-        public const string Minimize = "M5.5 12h13";
-        public const string Maximize = "M6.5 6.5h11v11h-11z";
-        public const string Restore =
-            "M8.5 8.5h9v9h-9z M15.5 8.5V6.2a1.7 1.7 0 0 0-1.7-1.7H6.2a1.7 1.7 0 0 0-1.7 1.7v7.6a1.7 1.7 0 0 0 1.7 1.7h2.3";
-        public const string Close = "M6.5 6.5l11 11 M17.5 6.5l-11 11";
-    }
 }

@@ -271,4 +271,113 @@ internal static class NativeMethods
 
         return result;
     }
+
+    // ---------- 录屏（窗口捕获 / 光标 / DIB 画布 / 窗口图标） ----------
+    [DllImport("user32.dll")]
+    internal static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    internal static extern IntPtr GetWindowDC(IntPtr hWnd);
+
+    /// <summary>PrintWindow 标志：DWM 完整内容渲染（被遮挡时仍可捕获窗口内容）</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+
+    internal const uint PW_RENDERFULLCONTENT = 0x00000002;
+
+    /// <summary>创建 DIB 段：GDI 绘制与内存读取共用同一块像素</summary>
+    [DllImport("gdi32.dll", SetLastError = true)]
+    internal static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFO pbmi, uint iUsage,
+        out IntPtr ppvBits, IntPtr hSection, uint dwOffset);
+
+    internal const uint DIB_RGB_COLORS = 0;
+
+    /// <summary>绘制光标（注意：由 user32 而非 gdi32 导出）</summary>
+    [DllImport("user32.dll")]
+    internal static extern bool DrawIconEx(IntPtr hdc, int xLeft, int yTop, IntPtr hIcon,
+        int cxWidth, int cyHeight, uint istepIfAniCur, IntPtr hbrFlickerFreeDraw, uint diFlags);
+
+    internal const uint DI_NORMAL = 0x0003;
+
+    internal const int CURSOR_SHOWING = 0x00000001;
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct CURSORINFO
+    {
+        public int cbSize;
+        public int flags;
+        public IntPtr hCursor;
+        public POINT ptScreenPos;
+    }
+
+    [DllImport("user32.dll")]
+    internal static extern bool GetCursorInfo(ref CURSORINFO pci);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    internal static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "GetClassLongPtrW")]
+    internal static extern IntPtr GetClassLongPtr(IntPtr hWnd, int nIndex);
+
+    internal const int GWL_EXSTYLE = -20;
+    internal const int GCLP_HICONSM = -34;
+    internal const int GCLP_HICON = -14;
+    internal const long WS_EX_TOOLWINDOW = 0x00000080L;
+    internal const long WS_EX_NOACTIVATE = 0x08000000L;
+
+    internal const uint WM_GETICON = 0x007F;
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern IntPtr SendMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct BITMAPINFOHEADER
+    {
+        public uint biSize;
+        public int biWidth;
+        public int biHeight;
+        public ushort biPlanes;
+        public ushort biBitCount;
+        public uint biCompression;
+        public uint biSizeImage;
+        public int biXPelsPerMeter;
+        public int biYPelsPerMeter;
+        public uint biClrUsed;
+        public uint biClrImportant;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct BITMAPINFO
+    {
+        public BITMAPINFOHEADER bmiHeader;
+        /// <summary>调色板占位（32bpp 不使用）</summary>
+        public uint bmiColors;
+    }
+
+    /// <summary>初始化当前线程 COM（录屏编码线程用）；返回 S_OK(0)/S_FALSE(1)/RPC_E_CHANGED_MODE</summary>
+    [DllImport("ole32.dll")]
+    internal static extern int CoInitializeEx(IntPtr pvReserved, uint dwCoInit);
+
+    [DllImport("ole32.dll")]
+    internal static extern void CoUninitialize();
+
+    internal const uint COINIT_MULTITHREADED = 0x0;
+
+    /// <summary>提高系统定时器精度到 1ms（帧间隔等待用），须与 timeEndPeriod 成对</summary>
+    [DllImport("winmm.dll")]
+    internal static extern uint timeBeginPeriod(uint period);
+
+    [DllImport("winmm.dll")]
+    internal static extern uint timeEndPeriod(uint period);
+
+    /// <summary>重设光标坐标（同坐标重设可触发 WM_MOUSEMOVE，用于刷新悬停状态）</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetCursorPos(int x, int y);
+
+    /// <summary>把窗口从屏幕捕获中排除（截图/录屏都拍不到，Win10 2004+）</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);
+
+    internal const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
 }

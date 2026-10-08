@@ -63,6 +63,8 @@ public static class Program
                 services.AddSingleton<IStorageService, StorageService>();
                 services.AddSingleton<HistoryService>();
                 services.AddSingleton<ClipboardService>();
+                services.AddSingleton<RecordingHistoryService>();
+                services.AddSingleton<RecordingService>();
             })
             .Build();
 

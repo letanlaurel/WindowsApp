@@ -38,6 +38,7 @@ public class SettingsWindow : Window
     private Slider _pinOpacity = null!;
     private TextBox _historyDir = null!;
     private TextBox _historyLimit = null!;
+    private TextBox _historyBuffer = null!;
 
     private const string AppRunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
@@ -201,19 +202,30 @@ public class SettingsWindow : Window
         dirPanel.Children.Add(_historyDir);
         dirPanel.Children.Add(browse);
 
-        _historyLimit = new TextBox { Text = his.ActiveLimit.ToString(), Width = 80, ToolTip = "活跃列表条数上限，超过后最旧的自动归档到压缩包（0 = 永不归档）" };
+        _historyLimit = new TextBox { Text = his.ActiveLimit.ToString(), Width = 80, ToolTip = "活跃列表条数上限；超过后开始攒缓冲，攒满一次性把最旧的按月归档到压缩包（0 = 永不归档）" };
         var limitPanel = new StackPanel { Orientation = Orientation.Horizontal };
         limitPanel.Children.Add(_historyLimit);
         limitPanel.Children.Add(new TextBlock
         {
-            Text = "条，超过后归档到 archive.zip",
+            Text = "条，超过后开始攒缓冲",
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(6, 0, 0, 0),
+        });
+
+        _historyBuffer = new TextBox { Text = his.ArchiveBuffer.ToString(), Width = 80, ToolTip = "超过上限后再攒多少张才批量归档（0 = 每超 1 张立即归档 1 张）" };
+        var bufferPanel = new StackPanel { Orientation = Orientation.Horizontal };
+        bufferPanel.Children.Add(_historyBuffer);
+        bufferPanel.Children.Add(new TextBlock
+        {
+            Text = "张，攒满后一次性归档",
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(6, 0, 0, 0),
         });
 
         return Group("截图历史",
             Row("数据目录", dirPanel),
-            Row("活跃上限", limitPanel));
+            Row("活跃上限", limitPanel),
+            Row("归档缓冲", bufferPanel));
     }
 
     // ---------------- 截图 ----------------
@@ -287,11 +299,14 @@ public class SettingsWindow : Window
         c.Pin.AlwaysOnTop = _pinTopmost.IsChecked == true;
         c.Pin.DefaultOpacity = _pinOpacity.Value;
 
-        // 历史：目录 + 活跃上限（解析失败回退 200）
+        // 历史：目录 + 活跃上限 + 归档缓冲（解析失败回退默认 500/10）
         c.History.Directory = _historyDir.Text.Trim();
         if (!int.TryParse(_historyLimit.Text.Trim(), out int limit))
-            limit = 200;
+            limit = 500;
         c.History.ActiveLimit = Math.Clamp(limit, 0, 1_000_000);
+        if (!int.TryParse(_historyBuffer.Text.Trim(), out int buffer))
+            buffer = 10;
+        c.History.ArchiveBuffer = Math.Clamp(buffer, 0, 100_000);
 
         SetAutoStart(c.General.AutoStart);
         _config.Save();
@@ -313,7 +328,7 @@ public class SettingsWindow : Window
 
     // ---------------- 控件辅助 ----------------
     /// <summary>带标题的配置分组</summary>
-    private static UIElement Group(string title, params FrameworkElement[] items)
+    internal static UIElement Group(string title, params FrameworkElement[] items)
     {
         var panel = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
         var header = new TextBlock
@@ -332,7 +347,7 @@ public class SettingsWindow : Window
     }
 
     /// <summary>标签 + 控件的行</summary>
-    private static FrameworkElement Row(string label, FrameworkElement control)
+    internal static FrameworkElement Row(string label, FrameworkElement control)
     {
         var panel = new StackPanel { Orientation = Orientation.Horizontal };
         panel.Children.Add(new TextBlock
@@ -346,7 +361,7 @@ public class SettingsWindow : Window
     }
 
     /// <summary>热键录入框：按下组合键即显示（如 Ctrl+Shift+F3），Esc 清空</summary>
-    private static TextBox HotkeyBox(string initial)
+    internal static TextBox HotkeyBox(string initial)
     {
         var tb = new TextBox { Width = 180, IsReadOnly = true, Text = initial };
         tb.PreviewKeyDown += (_, e) =>

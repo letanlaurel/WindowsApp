@@ -28,9 +28,12 @@ public class MainWindow : Window
     private ConfigService _config = null!;
     private HistoryService _historySvc = null!;
     private ClipboardService _clipboard = null!;
+    private RecordingService _recorder = null!;
+    private RecordingHistoryService _recHistory = null!;
 
     private History.HistoryWindow? _historyWin;
     private ClipboardHistory.ClipboardWindow? _clipboardWin;
+    private Recording.RecordingBarWindow? _recBar;
 
     public MainWindow()
     {
@@ -53,6 +56,13 @@ public class MainWindow : Window
         _config = services.GetRequiredService<ConfigService>();
         _historySvc = services.GetRequiredService<HistoryService>();
         _clipboard = services.GetRequiredService<ClipboardService>();
+        _recorder = services.GetRequiredService<RecordingService>();
+        _recHistory = services.GetRequiredService<RecordingHistoryService>();
+
+        // 录屏状态联动：开始 → 悬浮控制条；结束 → 关闭控制条并提示；错误 → 气泡
+        _recorder.Started += _ => ShowRecBar();
+        _recorder.Stopped += OnRecordingStopped;
+        _recorder.Error += text => _tray?.ShowBalloonTip("录屏出错", text, BalloonIcon.Error);
 
         // 建立 Win32 消息钩子以接收 WM_HOTKEY
         var helper = new WindowInteropHelper(this);
@@ -96,11 +106,19 @@ public class MainWindow : Window
             return;
         }
 
-        _historyWin = new History.HistoryWindow(_historySvc, _pin, _storage, _config);
+        _historyWin = new History.HistoryWindow(_historySvc, _pin, _storage, _config, _recHistory, _recorder);
         // 历史窗内点击"设置"时，由主窗体打开设置（保存后自动重注册热键）
         _historyWin.OpenSettingsRequested += OpenSettings;
         // 工具栏截图/剪贴板/全屏按钮复用热键分发逻辑
         _historyWin.ActionRequested += OnHotkey;
+        // 录屏面板点击「录制窗口」：打开录制目标选择器
+        _historyWin.RecordRequested += StartWindowRecording;
+        // 录屏设置保存后：重注册热键并迁移录屏目录
+        _historyWin.RecordingSettingsSaved += () =>
+        {
+            _hotkeys.RegisterAll(_hwnd);
+            _recHistory.ApplyConfigDirectory();
+        };
         _historyWin.Closed += (_, _) => _historyWin = null;
         _historyWin.Show();
     }
@@ -148,6 +166,19 @@ public class MainWindow : Window
                 case "pinClipboard": _capture.PinFromClipboard(); break;
                 case "togglePins": _pin.ToggleAll(); break;
                 case "clipboardHistory": ShowClipboardPopup(); break;
+                case "recordToggle":
+                    if (_recorder.IsRecording)
+                        _recorder.Stop(discard: false);
+                    else
+                        StartWindowRecording();
+                    break;
+                case "recordPause":
+                    if (_recorder.IsRecording)
+                    {
+                        if (_recorder.IsPaused) _recorder.Resume();
+                        else _recorder.Pause();
+                    }
+                    break;
             }
         });
     }
@@ -171,6 +202,70 @@ public class MainWindow : Window
         _clipboardWin.Closed += (_, _) => _clipboardWin = null;
         _clipboardWin.Show();
         _clipboardWin.Activate();
+    }
+
+    // ---------- 录屏 ----------
+    /// <summary>打开录制目标选择器，选定后开始录制该窗口</summary>
+    private void StartWindowRecording()
+    {
+        if (_recorder.IsRecording)
+        {
+            _tray?.ShowBalloonTip("正在录制", "请先停止当前录制，再开始新的录制。", BalloonIcon.Warning);
+            return;
+        }
+
+        var picker = new Recording.WindowPickerWindow();
+        if (_historyWin != null)
+            picker.Owner = _historyWin;
+        picker.WindowPicked += cand =>
+        {
+            if (cand.IsScreen)
+                _recorder.StartScreen(cand.ScreenBounds, cand.Title);
+            else
+                _recorder.Start(cand.Hwnd, cand.Title);
+        };
+        picker.Show();
+    }
+
+    /// <summary>录制开始：显示悬浮控制条</summary>
+    private void ShowRecBar()
+    {
+        // 保险：重复开始时先关旧条
+        _recBar?.Close();
+
+        var bar = new Recording.RecordingBarWindow(_recorder);
+        bar.StopRequested += () => _recorder.Stop(discard: false);
+        bar.PauseToggleRequested += () =>
+        {
+            if (_recorder.IsPaused) _recorder.Resume();
+            else _recorder.Pause();
+        };
+        bar.CancelRequested += () =>
+        {
+            if (MessageBox.Show("确定取消并丢弃本次录制？", "取消录制",
+                    MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
+                _recorder.Stop(discard: true);
+        };
+        bar.Closed += (_, _) =>
+        {
+            if (_recBar == bar) _recBar = null;
+        };
+        _recBar = bar;
+        bar.Show();
+    }
+
+    /// <summary>录制结束：关闭控制条并气泡提示</summary>
+    private void OnRecordingStopped(bool saved)
+    {
+        if (_recBar != null)
+        {
+            var bar = _recBar;
+            _recBar = null;
+            bar.Close();
+        }
+        if (saved)
+            _tray?.ShowBalloonTip("录屏已保存",
+                "可在主窗口「录屏」标签中查看，双击卡片即可播放。", BalloonIcon.Info);
     }
 
     // ---------- 系统托盘 ----------
@@ -197,6 +292,9 @@ public class MainWindow : Window
         var full = new MenuItem { Header = "全屏截图 (F3)" };
         full.Click += (_, _) => _capture.CaptureFullScreen();
 
+        var record = new MenuItem { Header = "录制窗口..." };
+        record.Click += (_, _) => StartWindowRecording();
+
         var closePins = new MenuItem { Header = "关闭所有贴图" };
         closePins.Click += (_, _) => _pin.CloseAll();
 
@@ -214,6 +312,7 @@ public class MainWindow : Window
         menu.Items.Add(capture);
         menu.Items.Add(pinClipboard);
         menu.Items.Add(full);
+        menu.Items.Add(record);
         menu.Items.Add(new Separator());
         menu.Items.Add(closePins);
         menu.Items.Add(openDir);
@@ -262,6 +361,8 @@ public class MainWindow : Window
 
     protected override void OnClosing(CancelEventArgs e)
     {
+        // 停止录制并等待编码收尾（保证 MP4 完整落盘）
+        _recorder?.Stop(discard: false, wait: true);
         // 覆盖非托盘退出路径（如注销、任务管理器结束等触发 Closing 的场景）
         _pin?.PersistSession();
         _hotkeys?.UnregisterAll();
