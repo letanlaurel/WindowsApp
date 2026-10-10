@@ -54,7 +54,8 @@ public class CaptureService : ICaptureService
             var overlay = new CaptureOverlayWindow(
                 snap.Bitmap, dipBounds, snap.Scale,
                 _config.Config.Capture.MaskOpacity,
-                _config.Config.Capture.WindowSnap);
+                _config.Config.Capture.WindowSnap,
+                _config.Config.Hotkeys.PinInCapture);
 
             // 用户在 overlay 内完成标注并选择输出动作
             overlay.Committed += (virtDip, annotations, action) =>

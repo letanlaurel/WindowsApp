@@ -53,6 +53,7 @@ public class CaptureOverlayWindow : Window
     private Rect _selectionRect;            // 当前选区（本屏 DIP）
     private Canvas? _annotLayer;            // 标注层（选区局部 DIP 显示）
     private AnnotationToolbar? _toolbar;    // 完整标注工具栏
+    private (ModifierKeys Mods, Key Key)? _pinGesture; // 截图编辑时钉住快捷键（解析结果，null=未启用）
     private BitmapSource? _cropBase;        // 选区物理裁剪图（马赛克采样源，惰性生成）
     private readonly List<Annotation> _annotations = new(); // 标注（选区局部物理像素坐标）
     private readonly UndoRedoStack _history = new();
@@ -120,12 +121,14 @@ public class CaptureOverlayWindow : Window
         Rect dipBounds,           // 该屏在虚拟屏中的 DIP 矩形（用于窗口定位与窗口矩形转换）
         double scale,             // 该屏缩放系数（Dpi/96）
         double maskOpacity = 0.4,
-        bool windowSnap = true)
+        bool windowSnap = true,
+        string? pinHotkey = null) // 标注阶段直接钉住的快捷键（如 "Ctrl+P"，空=禁用）
     {
         _screenImage = screenImage;
         _dipBounds = dipBounds;
         _scale = scale;
         _windowSnap = windowSnap;
+        _pinGesture = TryParsePinHotkey(pinHotkey);
 
         // ---- 窗口外观：覆盖本屏、无边框、置顶 ----
         WindowStyle = WindowStyle.None;
@@ -235,6 +238,14 @@ public class CaptureOverlayWindow : Window
             else if (e.Key == Key.Z && Keyboard.Modifiers.HasFlag(ModifierKeys.Control)) _history.Undo();
             else if (e.Key == Key.Y && Keyboard.Modifiers.HasFlag(ModifierKeys.Control)) _history.Redo();
             else if (e.Key == Key.Delete) DeleteSelected();
+            else if (_confirming && _pinGesture is { } g
+                     && Keyboard.Modifiers == g.Mods // 精确匹配，Ctrl+P 不被 Ctrl+Shift+P 误触
+                     && (e.Key == Key.System ? e.SystemKey : e.Key) == g.Key)
+            {
+                // 标注阶段按钉住快捷键：等效点击工具栏 📌（Alt 组合键经 System 键上报）
+                CommitAction(CaptureOutputAction.Pin);
+                e.Handled = true;
+            }
         };
         _history.Changed += RedrawAnnotations; // 撤销/重做后重绘标注层
         Focusable = true;
@@ -500,6 +511,54 @@ public class CaptureOverlayWindow : Window
         Committed?.Invoke(virtDip, _annotations.ToList(), action);
         _annotations.Clear();
         _history.Clear();
+    }
+
+    /// <summary>
+    /// 解析钉住快捷键文本（如 "Ctrl+P"、"Ctrl+Shift+F3"）为 WPF 修饰键 + 主键。
+    /// 支持 Ctrl/Shift/Alt 修饰键与 F1-F24/单字母/数字（含 D0-D9 写法），与设置窗 HotkeyBox 一致；
+    /// 解析失败或为空返回 null（不启用）。
+    /// </summary>
+    private static (ModifierKeys Mods, Key Key)? TryParsePinHotkey(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var mods = ModifierKeys.None;
+        Key? key = null;
+        foreach (var part in text.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            switch (part.ToLowerInvariant())
+            {
+                case "ctrl": case "control": mods |= ModifierKeys.Control; break;
+                case "shift": mods |= ModifierKeys.Shift; break;
+                case "alt": mods |= ModifierKeys.Alt; break;
+                default:
+                    var k = TryParseWpfKey(part);
+                    if (k == null) return null;
+                    key = k;
+                    break;
+            }
+        }
+        return key == null ? null : (mods, key.Value);
+    }
+
+    /// <summary>单个按键文本 → WPF Key（F1-F24 / 单字母 / 数字 0-9 及 D0-D9）</summary>
+    private static Key? TryParseWpfKey(string text)
+    {
+        // 功能键 F1-F24
+        if (text.StartsWith("f", StringComparison.OrdinalIgnoreCase) &&
+            int.TryParse(text[1..], out int f) && f >= 1 && f <= 24)
+            return Key.F1 + f - 1;
+
+        // WPF 风格数字 D0-D9
+        if (text.Length == 2 && text[0] is 'D' or 'd' && char.IsDigit(text[1]))
+            text = text[1..2];
+
+        if (text.Length == 1)
+        {
+            char c = char.ToUpperInvariant(text[0]);
+            if (c is >= 'A' and <= 'Z') return Key.A + (c - 'A');
+            if (c is >= '0' and <= '9') return Key.D0 + (c - '0');
+        }
+        return null;
     }
 
     // ---------------- 标注绘制（坐标：选区局部物理像素） ----------------

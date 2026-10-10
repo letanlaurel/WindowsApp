@@ -31,7 +31,7 @@ public class PinService : IPinService
 
     public void Pin(BitmapSource image, Point? position = null)
     {
-        var win = new PinWindow(image, _config.Config.Pin, _history);
+        var win = new PinWindow(image, _config.Config.Pin, _history, this);
 
         if (position.HasValue)
         {
@@ -89,7 +89,7 @@ public class PinService : IPinService
                 img.EndInit();
                 img.Freeze();
 
-                var win = new PinWindow(img, _config.Config.Pin, _history);
+                var win = new PinWindow(img, _config.Config.Pin, _history, this);
                 win.RestoreState(st);
                 win.Left = st.Left;
                 win.Top = st.Top;

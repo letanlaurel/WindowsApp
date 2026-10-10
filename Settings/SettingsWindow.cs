@@ -24,6 +24,7 @@ public class SettingsWindow : Window
     private TextBox _hkPinClipboard = null!;
     private TextBox _hkFullScreen = null!;
     private TextBox _hkTogglePins = null!;
+    private TextBox _hkPinInCapture = null!;
     private TextBox _hkClipboard = null!;
     private CheckBox _clipboardEnabled = null!;
     private TextBox _clipboardLimit = null!;
@@ -118,6 +119,8 @@ public class SettingsWindow : Window
         _hkPinClipboard = HotkeyBox(hk.PinClipboard);
         _hkFullScreen = HotkeyBox(hk.FullScreen);
         _hkTogglePins = HotkeyBox(hk.TogglePins);
+        _hkPinInCapture = HotkeyBox(hk.PinInCapture);
+        _hkPinInCapture.ToolTip = "仅在截图编辑界面有效（等效点击工具栏 📌 钉住）；勿与上方全局热键相同，否则截图期间会被系统拦截收不到";
         _hkClipboard = HotkeyBox(_config.Config.Clipboard.Hotkey);
 
         return Group("热键（点击输入框后按下新快捷键，Esc 清空）",
@@ -125,6 +128,7 @@ public class SettingsWindow : Window
             Row("钉住剪贴板图片", _hkPinClipboard),
             Row("全屏截图", _hkFullScreen),
             Row("显示/隐藏贴图", _hkTogglePins),
+            Row("截图编辑时钉住", _hkPinInCapture),
             Row("剪贴板历史弹窗", _hkClipboard));
     }
 
@@ -279,6 +283,7 @@ public class SettingsWindow : Window
         c.Hotkeys.PinClipboard = _hkPinClipboard.Text.Trim();
         c.Hotkeys.FullScreen = _hkFullScreen.Text.Trim();
         c.Hotkeys.TogglePins = _hkTogglePins.Text.Trim();
+        c.Hotkeys.PinInCapture = _hkPinInCapture.Text.Trim();
 
         // 剪贴板历史：热键 + 启用开关 + 记录上限（解析失败回退 500）
         c.Clipboard.Hotkey = _hkClipboard.Text.Trim();

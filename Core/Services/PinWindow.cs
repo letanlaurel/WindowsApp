@@ -27,6 +27,7 @@ public class PinWindow : Window
     private readonly List<Annotation> _annotations = new();
     private readonly UndoRedoStack _history = new();
     private readonly HistoryService _historyService; // ✓ 写入时生成截图历史记录
+    private readonly IPinService _pinService; // ✓ 右键"关闭所有贴图"用
     private Canvas? _annotCanvas;
     private AnnotationToolbar? _toolbar;
     private bool _toolbarVisible;
@@ -70,11 +71,12 @@ public class PinWindow : Window
         Topmost = _alwaysOnTop;
     }
 
-    public PinWindow(BitmapSource image, PinConfig config, HistoryService historyService)
+    public PinWindow(BitmapSource image, PinConfig config, HistoryService historyService, IPinService pinService)
     {
         _config = config;
         _baseImage = image;
         _historyService = historyService;
+        _pinService = pinService;
         _alwaysOnTop = config.AlwaysOnTop;
 
         // ---- 窗口外观：无边框、置顶、透明背景、可调整 ----
@@ -806,6 +808,9 @@ public class PinWindow : Window
         var close = new MenuItem { Header = "关闭" };
         close.Click += (_, _) => Close();
 
+        var closeAll = new MenuItem { Header = "关闭所有贴图" };
+        closeAll.Click += (_, _) => _pinService.CloseAll();
+
         menu.Items.Add(toolbarItem);
         menu.Items.Add(topmost);
         menu.Items.Add(opacityPanel);
@@ -815,6 +820,7 @@ public class PinWindow : Window
         menu.Items.Add(save);
         menu.Items.Add(new Separator());
         menu.Items.Add(close);
+        menu.Items.Add(closeAll);
         return menu;
     }
 

@@ -40,6 +40,8 @@ public class HotkeyConfig
     public string RecordToggle { get; set; } = "Ctrl+Alt+R";
     /// <summary>暂停/恢复录制</summary>
     public string RecordPause { get; set; } = "Ctrl+Alt+P";
+    /// <summary>截图编辑时直接钉住（窗口内快捷键，非全局热键）</summary>
+    public string PinInCapture { get; set; } = "Ctrl+P";
 }
 
 public class SaveConfig
