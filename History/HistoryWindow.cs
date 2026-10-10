@@ -1168,9 +1168,9 @@ public class HistoryWindow : Window
         {
             PlacementTarget = target,
             Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom,
-            Style = ClearMenuStyle,
+            Style = UiKit.MenuStyle,
         };
-        menu.Resources.Add(typeof(MenuItem), ClearMenuItemStyle);
+        menu.Resources.Add(typeof(MenuItem), UiKit.MenuItemStyle);
 
         var all = new MenuItem
         {
@@ -1384,53 +1384,4 @@ public class HistoryWindow : Window
         return (btn, IconPath(icon));
     }
 
-    /// <summary>清空菜单：白色圆角浮层 + 轻阴影</summary>
-    private static Style ClearMenuStyle => (Style)XamlReader.Parse("""
-        <Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' TargetType='ContextMenu'>
-            <Setter Property='OverridesDefaultStyle' Value='True'/>
-            <Setter Property='Foreground' Value='#3A4150'/>
-            <Setter Property='FontSize' Value='12.5'/>
-            <Setter Property='Template'>
-                <Setter.Value>
-                    <ControlTemplate TargetType='ContextMenu'>
-                        <Border Margin='8' Background='#FFFFFF' CornerRadius='12'
-                                BorderBrush='#E4E7F2' BorderThickness='1' Padding='6'>
-                            <Border.Effect>
-                                <DropShadowEffect BlurRadius='14' ShadowDepth='0' Opacity='0.14' Color='#4A5578'/>
-                            </Border.Effect>
-                            <StackPanel IsItemsHost='True' KeyboardNavigation.DirectionalNavigation='Cycle'/>
-                        </Border>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-        """);
-
-    /// <summary>清空菜单项：悬停浅紫底</summary>
-    private static Style ClearMenuItemStyle => (Style)XamlReader.Parse("""
-        <Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' TargetType='MenuItem'>
-            <Setter Property='OverridesDefaultStyle' Value='True'/>
-            <Setter Property='Foreground' Value='#3A4150'/>
-            <Setter Property='Template'>
-                <Setter.Value>
-                    <ControlTemplate TargetType='MenuItem'>
-                        <Border Name='bg' CornerRadius='8' Padding='9,7,14,7' Background='Transparent' SnapsToDevicePixels='True'>
-                            <StackPanel Orientation='Horizontal'>
-                                <ContentPresenter ContentSource='Icon' VerticalAlignment='Center' Margin='0,0,8,0'/>
-                                <ContentPresenter ContentSource='Header' VerticalAlignment='Center'/>
-                            </StackPanel>
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property='IsHighlighted' Value='True'>
-                                <Setter TargetName='bg' Property='Background' Value='#F1EFFD'/>
-                            </Trigger>
-                            <Trigger Property='IsEnabled' Value='False'>
-                                <Setter Property='Opacity' Value='0.45'/>
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-        """);
-}
+    }

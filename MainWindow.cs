@@ -185,23 +185,36 @@ public class MainWindow : Window
 
     /// <summary>
     /// 在鼠标附近弹出剪贴板历史（Ctrl+Alt+V）。
-    /// 弹出前记录当前前台窗口，选中条目后恢复焦点并模拟 Ctrl+V 完成粘贴。
+    /// 弹出前记录当前前台窗口；面板非激活+低级钩子喂键（同 Win+V），目标全程不失焦，
+    /// 选中条目后直接模拟 Ctrl+V 完成粘贴。
     /// </summary>
     private void ShowClipboardPopup()
     {
         if (_clipboardWin != null)
         {
-            // 已打开则直接激活（同 Win+V 行为）
-            _clipboardWin.Activate();
+            // 已打开则激活弹窗聚焦搜索框（可输入中文）
+            _clipboardWin.FocusWindow();
             return;
         }
 
         // 弹窗显示前保存粘贴目标窗口（此时前台仍是用户原来的应用）
         var target = NativeMethods.GetForegroundWindow();
-        _clipboardWin = new ClipboardHistory.ClipboardWindow(_clipboard, target);
+        // 记录目标当前焦点子窗口（通常即输入框）：粘贴时精确归还焦点，避免只激活顶层窗口而编辑焦点丢失
+        var focusHwnd = target;
+        try
+        {
+            var tid = NativeMethods.GetWindowThreadProcessId(target, out _);
+            var gi = new NativeMethods.GUITHREADINFO
+            {
+                cbSize = System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.GUITHREADINFO>(),
+            };
+            if (tid != 0 && NativeMethods.GetGUIThreadInfo(tid, ref gi) && gi.HwndFocus != IntPtr.Zero)
+                focusHwnd = gi.HwndFocus;
+        }
+        catch { /* 查询失败回退顶层窗口 */ }
+        _clipboardWin = new ClipboardHistory.ClipboardWindow(_clipboard, target, focusHwnd);
         _clipboardWin.Closed += (_, _) => _clipboardWin = null;
-        _clipboardWin.Show();
-        _clipboardWin.Activate();
+        _clipboardWin.Show(); // 非激活显示：不夺走目标窗口焦点（同 Win+V），键盘由低级钩子喂入
     }
 
     // ---------- 录屏 ----------

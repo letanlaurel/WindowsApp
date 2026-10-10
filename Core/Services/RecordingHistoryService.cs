@@ -126,6 +126,26 @@ public class RecordingHistoryService
     }
 
     /// <summary>条目对应的 MP4 完整路径</summary>
+	/// <summary>把所选录屏打包导出为 zip（跳过文件已丢失的条目），返回成功导出数</summary>
+	public int ExportZip(IReadOnlyList<RecordingEntry> entries, string zipPath)
+	{
+		int exported = 0;
+		using (ZipArchive zip = ZipFile.Open(zipPath, ZipArchiveMode.Create))
+		{
+			foreach (RecordingEntry e in entries)
+			{
+				string src = Path.Combine(_currentDir, e.FileName);
+				if (!File.Exists(src))
+				{
+					continue;
+				}
+				zip.CreateEntryFromFile(src, e.FileName, CompressionLevel.Optimal);
+				exported++;
+			}
+		}
+		return exported;
+	}
+
     public string FilePath(RecordingEntry entry) => Path.Combine(_currentDir, entry.FileName);
 
     /// <summary>加载缩略图（可指定解码宽度节省内存）</summary>

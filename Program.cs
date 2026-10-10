@@ -127,6 +127,22 @@ public static class Program
         }
     }
 
+    /// <summary>追加写入剪贴板粘贴诊断日志（%AppData%\TLSnipPin\clipboard_debug.log，焦点问题排查用）</summary>
+    public static void LogDiag(string message)
+    {
+        try
+        {
+            Directory.CreateDirectory(DataDir);
+            File.AppendAllText(
+                Path.Combine(DataDir, "clipboard_debug.log"),
+                $"[{DateTime.Now:HH:mm:ss.fff}] {message}{Environment.NewLine}");
+        }
+        catch
+        {
+            // 诊断日志失败静默
+        }
+    }
+
     /// <summary>
     /// 加载应用图标（WPF ImageSource，优先从进程 exe 提取，失败回退嵌入资源）。
     /// 单文件发布下 pack:// 解析不稳定时，exe 图标仍可靠（任务栏图标即用此）。

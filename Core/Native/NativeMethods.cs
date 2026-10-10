@@ -200,6 +200,121 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     internal static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
+    /// <summary>获取当前线程 ID（kernel32）</summary>
+    [DllImport("kernel32.dll")]
+    internal static extern uint GetCurrentThreadId();
+
+    /// <summary>把两个线程的输入状态挂接在一起，可绕过系统的前台锁定限制（恢复粘贴目标焦点用）</summary>
+    [DllImport("user32.dll")]
+    internal static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+    /// <summary>设置键盘焦点窗口（跨线程须先 AttachThreadInput）</summary>
+    [DllImport("user32.dll")]
+    internal static extern IntPtr SetFocus(IntPtr hWnd);
+
+    /// <summary>修改窗口扩展样式（加 WS_EX_NOACTIVATE 用）</summary>
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    internal static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    /// <summary>线程输入状态信息（含焦点/激活/插入符窗口，跨线程只读查询无需挂接）</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct GUITHREADINFO
+    {
+        public int cbSize;
+        public IntPtr Flags, HwndActive, HwndFocus, HwndCapture, HwndMenuOwner, HwndMoveSize, HwndCaret;
+        public RECT RcCaret;
+    }
+
+    /// <summary>查询指定线程的输入状态（用于记录/验证目标输入框的焦点窗口）</summary>
+    [DllImport("user32.dll")]
+    internal static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO lpgui);
+
+    // ---------- 低级键盘/鼠标钩子（剪贴板弹窗不夺焦输入，同 Win+V 机制） ----------
+
+    /// <summary>低级键盘钩子：回调跑在安装钩子的线程（须有消息循环），无需注入 DLL</summary>
+    internal const int WH_KEYBOARD_LL = 13;
+    /// <summary>低级鼠标钩子：检测点击面板外部以关闭</summary>
+    internal const int WH_MOUSE_LL = 14;
+    /// <summary>钩子事件代码：有输入事件待处理</summary>
+    internal const int HC_ACTION = 0;
+    /// <summary>低级钩子标志：事件由 SendInput/keybd_event 注入（自己的 Ctrl+V 须放行）</summary>
+    internal const uint LLKHF_INJECTED = 0x00000010;
+
+    /// <summary>低级钩子回调签名</summary>
+    internal delegate IntPtr LowLevelHookProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    /// <summary>安装低级钩子（hMod 传当前进程模块句柄，线程参数 0 表示全局）</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern IntPtr SetWindowsHookEx(int idHook, LowLevelHookProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    /// <summary>卸载低级钩子</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    /// <summary>把事件传给钩子链的下一环</summary>
+    [DllImport("user32.dll")]
+    internal static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    /// <summary>取当前进程模块句柄（装全局低级钩子用）</summary>
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    internal static extern IntPtr GetModuleHandle(string? lpModuleName);
+
+    /// <summary>低级键盘事件数据</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct KBDLLHOOKSTRUCT
+    {
+        public uint vkCode, scanCode, flags, time;
+        public IntPtr dwExtraInfo;
+    }
+
+    /// <summary>低级鼠标事件数据</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct MSLLHOOKSTRUCT
+    {
+        public POINT pt;
+        public uint mouseData, flags, time;
+        public IntPtr dwExtraInfo;
+    }
+
+    /// <summary>键盘消息常量（低级钩子的 wParam）</summary>
+    internal const uint WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105;
+    /// <summary>鼠标按下消息（含非客户区变体，点外部关面板用）</summary>
+    internal const uint WM_LBUTTONDOWN = 0x0201, WM_RBUTTONDOWN = 0x0204, WM_MBUTTONDOWN = 0x0207;
+    internal const uint WM_NCLBUTTONDOWN = 0x00A1, WM_NCRBUTTONDOWN = 0x00A4, WM_NCMBUTTONDOWN = 0x00A7;
+    /// <summary>鼠标按下激活消息：返回 MA_NOACTIVATE 让点击不激活窗口</summary>
+    internal const uint WM_MOUSEACTIVATE = 0x0021;
+    /// <summary>WM_MOUSEACTIVATE 返回值：不激活也不丢弃点击</summary>
+    internal const int MA_NOACTIVATE = 3;
+
+    /// <summary>虚拟键（钩子分流 + 按键翻译用；VK_CONTROL/VK_MENU 已在上方定义）</summary>
+    internal const byte VK_BACK = 0x08, VK_TAB = 0x09, VK_RETURN = 0x0D, VK_SHIFT = 0x10,
+        VK_ESCAPE = 0x1B, VK_HOME = 0x24, VK_END = 0x23,
+        VK_LEFT = 0x25, VK_UP = 0x26, VK_RIGHT = 0x27, VK_DOWN = 0x28,
+        VK_DELETE = 0x2E, VK_LWIN = 0x5B, VK_RWIN = 0x5C,
+        VK_LSHIFT = 0xA0, VK_RSHIFT = 0xA1, VK_LCONTROL = 0xA2, VK_RCONTROL = 0xA3,
+        VK_LMENU = 0xA4, VK_RMENU = 0xA5;
+
+    /// <summary>查询虚拟键物理按下状态（装钩子时取修饰键初始状态；键被钩子吞掉后不再更新）</summary>
+    [DllImport("user32.dll")]
+    internal static extern short GetAsyncKeyState(int vKey);
+
+    /// <summary>取本线程键盘状态快照（翻译按键前按修饰键状态修正）</summary>
+    [DllImport("user32.dll")]
+    internal static extern bool GetKeyboardState(byte[] lpKeyState);
+
+    /// <summary>取指定线程的键盘布局（按键翻译用目标布局）</summary>
+    [DllImport("user32.dll")]
+    internal static extern IntPtr GetKeyboardLayout(uint idThread);
+
+    /// <summary>虚拟键码 → Unicode 字符（窗口线程里调用，勿在钩子回调里调：会改死键状态）</summary>
+    [DllImport("user32.dll")]
+    internal static extern int ToUnicodeEx(uint wVirtKey, uint wScanCode, byte[] lpKeyState,
+        [Out] char[] pwszBuff, int cchBuff, uint wFlags, IntPtr dwhkl);
+
+    /// <summary>取坐标下的窗口句柄（判断鼠标点击是否落在本进程窗口上）</summary>
+    [DllImport("user32.dll")]
+    internal static extern IntPtr WindowFromPoint(POINT point);
+
     // ---------- 窗口枚举（智能窗口识别用） ----------
     internal delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 

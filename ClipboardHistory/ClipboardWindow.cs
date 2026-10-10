@@ -12,17 +12,23 @@ using SnipPin.Core.Services;
 namespace SnipPin.ClipboardHistory;
 
 /// <summary>
-/// 剪贴板历史弹窗（Ctrl+Alt+V 在鼠标附近弹出，参考 Win+V）：
+/// 剪贴板历史弹窗（Ctrl+Alt+V 在鼠标附近弹出，复刻 Win+V 机制，目标窗口全程不失焦）：
 /// - 顶部：模糊搜索框 + 日期筛选（DatePicker）
 /// - 列表：文本摘要 / 图片缩略图 / 文件列表，时间精确到秒，悬停显示删除按钮
-/// - 点击条目：写回剪贴板 → 恢复原前台窗口 → 模拟 Ctrl+V 完成粘贴
-/// - Esc / 失去焦点 自动关闭
+/// - 非激活显示（WS_EX_NOACTIVATE + WM_MOUSEACTIVATE→MA_NOACTIVATE）：目标窗口保持前台与焦点
+/// - 键盘：WH_KEYBOARD_LL 低级钩子把按键喂给搜索框（面板不取 Win32 焦点）
+/// - 点击搜索框只移动光标，不激活弹窗（与日期筛选相同，目标窗口保持前台）
+/// - 中文输入法无法挂到无焦点窗口：再次按下热键才进入 IME 模式，粘贴/Esc 前恢复目标前台
+/// - 点击条目：卸钩子 → 写回剪贴板 → 模拟 Ctrl+V（前台从未离开目标，直接命中）
+/// - Esc / 点击面板外（WH_MOUSE_LL 检测）/ 切换窗口（哨兵轮询）自动关闭
 /// </summary>
 public class ClipboardWindow : Window
 {
     private readonly ClipboardService _clipboard;
     /// <summary>弹窗打开前的前台窗口（粘贴目标）</summary>
     private readonly IntPtr _targetHwnd;
+    /// <summary>弹窗打开前目标窗口内的焦点子窗口（通常即输入框），粘贴时精确归还</summary>
+    private readonly IntPtr _focusHwnd;
 
     private TextBox _searchBox = null!;
     private TextBlock _placeholder = null!;
@@ -57,6 +63,34 @@ public class ClipboardWindow : Window
     private readonly List<(Border Placeholder, ClipboardEntry Entry)> _thumbQueue = new();
     private bool _thumbPumping;
     private bool _closed;
+    /// <summary>关闭哨兵：非激活窗口收不到 Deactivated，用轮询检测用户切换到其他窗口后自动关闭</summary>
+    private DispatcherTimer? _closeGuard;
+    /// <summary>本弹窗句柄（哨兵豁免自身用）</summary>
+    private IntPtr _selfHwnd;
+    /// <summary>粘贴目标线程 ID（键盘布局翻译用）</summary>
+    private uint _targetThreadId;
+    /// <summary>是否与目标线程保持 AttachThreadInput 挂接（仅 IME 激活模式需要）</summary>
+    private bool _attached;
+
+    // ---- 非激活输入（同 Win+V：面板不夺焦点，低级钩子把按键喂进搜索框） ----
+    /// <summary>低级键盘钩子句柄</summary>
+    private IntPtr _keyHook;
+    /// <summary>低级鼠标钩子句柄（点击面板外关闭）</summary>
+    private IntPtr _mouseHook;
+    /// <summary>钩子回调委托（须持引用防被 GC 回收）</summary>
+    private NativeMethods.LowLevelHookProc? _keyHookProc, _mouseHookProc;
+    /// <summary>IME 模式：再次按下热键后弹窗真正激活（输入法需要真实焦点），此时键盘钩子已卸</summary>
+    private bool _imeMode;
+    /// <summary>钩子模式下的搜索光标（TextBox 无 Win32 焦点时系统光标不显示）</summary>
+    private Border? _searchCaret;
+    private DispatcherTimer? _caretBlink;
+    private bool _caretPhase = true;
+    /// <summary>修饰键物理状态（钩子吞键后 GetAsyncKeyState 不再更新，在钩子里自行维护）</summary>
+    private bool _modCtrl, _modShift, _modAlt;
+    /// <summary>键盘高亮的列表条目索引（同 Win+V 上下键导航，-1 无）</summary>
+    private int _selIndex = -1;
+    /// <summary>列表条目容器（按显示顺序，供高亮/滚动定位）</summary>
+    private readonly List<Border> _itemBorders = new();
 
     // ---- 字体 / 配色（与 HistoryWindow 保持一致的柔和浅色 + 薰衣草紫） ----
     private const string UiFont = "Segoe UI Variable Text, Segoe UI";
@@ -79,10 +113,11 @@ public class ClipboardWindow : Window
         return brush;
     }
 
-    public ClipboardWindow(ClipboardService clipboard, IntPtr targetHwnd)
+    public ClipboardWindow(ClipboardService clipboard, IntPtr targetHwnd, IntPtr focusHwnd)
     {
         _clipboard = clipboard;
         _targetHwnd = targetHwnd;
+        _focusHwnd = focusHwnd != IntPtr.Zero ? focusHwnd : targetHwnd;
 
         Title = "剪贴板历史";
         Icon = Program.LoadAppIcon();
@@ -98,6 +133,8 @@ public class ClipboardWindow : Window
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
         Background = Brushes.Transparent;
+        // 有有效粘贴目标时非激活显示（不夺目标焦点）；无目标（前台是本应用）时正常激活便于搜索
+        ShowActivated = targetHwnd == IntPtr.Zero;
 
         // DatePicker 日历随系统语言（中文环境显示中文日历）
         Language = System.Windows.Markup.XmlLanguage.GetLanguage(
@@ -124,6 +161,7 @@ public class ClipboardWindow : Window
         {
             var anim = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(120)) { EasingFunction = new QuadraticEase() };
             BeginAnimation(OpacityProperty, anim);
+            Dispatcher.BeginInvoke(UpdateSearchCaret, DispatcherPriority.Loaded);
         };
     }
 
@@ -192,11 +230,12 @@ public class ClipboardWindow : Window
             BorderThickness = new Thickness(1),
             Width = 176,
             Height = 30,
+            ClipToBounds = true,
         };
         var searchGrid = new Grid();
         _placeholder = new TextBlock
         {
-            Text = "搜索文本内容...",
+            Text = "搜索…",
             Foreground = TextSecondary,
             FontSize = 12.5,
             VerticalAlignment = VerticalAlignment.Center,
@@ -211,6 +250,10 @@ public class ClipboardWindow : Window
             FontSize = 12.5,
             Padding = new Thickness(8, 0, 8, 0),
             VerticalAlignment = VerticalAlignment.Center,
+            // 有粘贴目标时不可获焦：TextBox 一旦 Focus 会把弹窗激活，目标窗口标题栏失焦。
+            // 无目标时仍走原生焦点。再次按热键进入 IME 模式前会把 Focusable 打开。
+            Focusable = _targetHwnd == IntPtr.Zero,
+            IsInactiveSelectionHighlightEnabled = true,
         };
         _searchBox.TextChanged += (_, _) =>
         {
@@ -220,18 +263,37 @@ public class ClipboardWindow : Window
             _searchDebounce.Stop();
             _searchDebounce.Start();
         };
-        // 回车：粘贴当前过滤结果的第一条（多选模式下禁用）
+        // 回车：粘贴当前键盘高亮条目（多选模式下禁用）
         _searchBox.KeyDown += (_, e) =>
         {
             if (e.Key == Key.Enter && !_selectMode)
-            {
-                var first = Filtered().FirstOrDefault();
-                if (first != null) PasteAndClose(first);
-            }
+                PasteFromKeyboard();
+        };
+        _searchCaret = new Border
+        {
+            Width = 1,
+            Background = TextPrimary,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
+            IsHitTestVisible = false,
+            Visibility = Visibility.Collapsed,
+            SnapsToDevicePixels = true,
         };
         searchGrid.Children.Add(_placeholder);
         searchGrid.Children.Add(_searchBox);
+        searchGrid.Children.Add(_searchCaret);
         searchBorder.Child = searchGrid;
+        _searchBox.SelectionChanged += (_, _) => UpdateSearchCaret();
+        _searchBox.SizeChanged += (_, _) => UpdateSearchCaret();
+        // 点击只落光标，不激活弹窗。激活（IME）会 SetForegroundWindow，目标窗口因此失焦；
+        // 日期筛选不走这条路，所以点日历不会失焦。字符仍由低级键盘钩子喂入。
+        searchBorder.PreviewMouseLeftButtonDown += (_, e) =>
+        {
+            if (_targetHwnd == IntPtr.Zero || _imeMode)
+                return; // 无目标或已在 IME：交给 TextBox 原生处理
+            e.Handled = true;
+            PlaceSearchCaret(e.GetPosition(_searchBox));
+        };
         row.Children.Add(searchBorder);
 
         // 日期筛选
@@ -367,6 +429,7 @@ public class ClipboardWindow : Window
         _thumbQueue.Clear(); // 旧占位符随重建作废
         _itemChecks.Clear();
         _listPanel.Children.Clear();
+        _itemBorders.Clear();
 
         var items = Filtered().ToList();
         _visibleItems = items;
@@ -380,7 +443,15 @@ public class ClipboardWindow : Window
         }
 
         foreach (var entry in items)
-            _listPanel.Children.Add(BuildItem(entry));
+        {
+            var item = BuildItem(entry);
+            _itemBorders.Add(item);
+            _listPanel.Children.Add(item);
+        }
+
+        // 键盘高亮复位到第一条（多选模式无键盘导航）
+        _selIndex = !_selectMode && items.Count > 0 ? 0 : -1;
+        ApplySelHighlight();
 
         bool empty = items.Count == 0;
         _emptyHint.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
@@ -593,8 +664,10 @@ public class ClipboardWindow : Window
         };
         item.MouseLeave += (_, _) =>
         {
-            item.Background = Brushes.White;
-            item.BorderBrush = NormalBorder;
+            // 恢复外观时区分键盘选中态（选中项保持高亮）
+            bool sel = !_selectMode && _itemBorders.IndexOf(item) == _selIndex;
+            item.Background = sel ? ItemHoverBg : Brushes.White;
+            item.BorderBrush = sel ? HoverBorder : NormalBorder;
             deleteBtn.Opacity = 0;
         };
 
@@ -838,24 +911,78 @@ public class ClipboardWindow : Window
     // ---------------- 粘贴 ----------------
 
     /// <summary>
-    /// 选中条目：写回剪贴板 → 关闭弹窗 → 恢复原前台窗口 → 模拟 Ctrl+V。
-    /// 延时等待焦点切换完成，避免目标应用丢失按键。
+    /// 选中条目粘贴：卸钩子 → 写回剪贴板 → 关窗 → 模拟 Ctrl+V。
+    /// 默认（钩子）模式下前台从未离开目标窗口，无需任何焦点恢复，按键直接命中；
+    /// IME 模式（弹窗被点激活）下焦点在弹窗，须按"前台→焦点→解挂"时序归还后再模拟。
     /// </summary>
     private void PasteAndClose(ClipboardEntry entry)
     {
+        UninstallHooks(); // 先卸钩子：注入的 Ctrl+V 不能被自己吞掉
+
         _clipboard.SetEntryToClipboard(entry);
         _clipboard.Promote(entry); // 置顶（写回剪贴板已被抑制记录）
 
+        var target = _targetHwnd; // 窗口关闭后再取字段不可靠，先存局部
+        var foreBefore = NativeMethods.GetForegroundWindow();
+
+        if (target == IntPtr.Zero)
+        {
+            // 无有效粘贴目标（按热键时前台是本应用窗口）：仅写回剪贴板置顶，不模拟按键
+            Close();
+            Program.LogDiag("粘贴跳过：无有效粘贴目标，仅写回剪贴板");
+            return;
+        }
+
+        // IME 模式下焦点被弹窗持有，精确归还到弹窗打开时的焦点子窗口（输入框）。
+        // 时序铁律：前台与焦点必须同线程——先 SetForegroundWindow 再 SetFocus，
+        // 最后解除挂接、关窗；顺序反了焦点会在竞态中归零（目标焦点=0x0 的教训）
+        if (_imeMode || _attached)
+        {
+            try
+            {
+                var appThread = NativeMethods.GetCurrentThreadId();
+                var targetThread = NativeMethods.GetWindowThreadProcessId(target, out _);
+                if (targetThread != 0 && targetThread != appThread)
+                {
+                    if (!_attached)
+                    {
+                        _targetThreadId = targetThread;
+                        _attached = NativeMethods.AttachThreadInput(appThread, targetThread, true);
+                    }
+                    NativeMethods.SetForegroundWindow(target); // 挂接中调用不受系统前台锁定限制
+                    NativeMethods.SetFocus(NativeMethods.IsWindow(_focusHwnd) ? _focusHwnd : target);
+                    DetachFromTarget();
+                }
+                else
+                {
+                    // 同进程目标（如本应用主窗口/历史窗口）：同线程直接切前台落焦点
+                    NativeMethods.SetForegroundWindow(target);
+                    NativeMethods.SetFocus(NativeMethods.IsWindow(_focusHwnd) ? _focusHwnd : target);
+                }
+            }
+            catch (Exception ex)
+            {
+                Program.LogError("粘贴前归还焦点", ex);
+            }
+        }
+
         Close();
+        Program.LogDiag($"粘贴开始 ime={_imeMode} target=0x{target:X} 关窗前前台=0x{foreBefore:X} 前台即目标={foreBefore == target} 目标标题={WindowTitle(target)}");
 
         Dispatcher.BeginInvoke(new Action(async () =>
         {
             try
             {
-                await Task.Delay(120); // 等弹窗关闭、焦点稳定
-                if (_targetHwnd != IntPtr.Zero)
-                    NativeMethods.SetForegroundWindow(_targetHwnd);
-                await Task.Delay(60);
+                await Task.Delay(50); // 等剪贴板写入与关窗稳定（前台本就未变，无需长轮询）
+                RestoreTargetForeground(target); // 安全网：正常路径目标一直在前台，直接通过
+                // 轮询确认目标真正在前台（IME 归还路径可能需要几帧），确保按键不落空
+                int waited = 0;
+                while (NativeMethods.GetForegroundWindow() != target && waited < 400)
+                {
+                    await Task.Delay(20);
+                    waited += 20;
+                }
+                await Task.Delay(30);
 
                 // 释放可能仍按住的 Alt（Ctrl+Alt+V 触发时），避免组合成其他快捷键
                 NativeMethods.keybd_event(NativeMethods.VK_MENU, 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
@@ -864,6 +991,7 @@ public class ClipboardWindow : Window
                 NativeMethods.keybd_event(0x56, 0, 0, UIntPtr.Zero); // 'V'
                 NativeMethods.keybd_event(0x56, 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
                 NativeMethods.keybd_event(NativeMethods.VK_CONTROL, 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
+                Program.LogDiag($"已发 Ctrl+V ime={_imeMode} 等待={waited}ms 前台即目标={NativeMethods.GetForegroundWindow() == target}");
             }
             catch (Exception ex)
             {
@@ -872,7 +1000,64 @@ public class ClipboardWindow : Window
         }), DispatcherPriority.Background);
     }
 
+    /// <summary>
+    /// 兜底：把粘贴目标设回前台。非激活弹窗下目标本就一直是前台，正常路径直接通过；
+    /// 若被其他程序意外抢走，则用 AttachThreadInput 挂接目标线程绕过系统前台锁定，
+    /// 仍失败再用 Alt 抬起事件兜底重试。
+    /// </summary>
+    private static void RestoreTargetForeground(IntPtr target)
+    {
+        if (target == IntPtr.Zero) return;
+        try
+        {
+            if (NativeMethods.GetForegroundWindow() == target) return; // 正常路径：从未失焦
+
+            var appThread = NativeMethods.GetCurrentThreadId();
+            var targetThread = NativeMethods.GetWindowThreadProcessId(target, out _);
+            if (targetThread != 0 && targetThread != appThread)
+            {
+                NativeMethods.AttachThreadInput(appThread, targetThread, true);
+                try { NativeMethods.SetForegroundWindow(target); }
+                finally { NativeMethods.AttachThreadInput(appThread, targetThread, false); }
+            }
+            else
+            {
+                NativeMethods.SetForegroundWindow(target);
+            }
+
+            // 兜底：注入一次 Alt 抬起事件，让系统认为本进程刚收到用户输入，再试设前台
+            if (NativeMethods.GetForegroundWindow() != target)
+            {
+                NativeMethods.keybd_event(NativeMethods.VK_MENU, 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
+                NativeMethods.SetForegroundWindow(target);
+            }
+            Program.LogDiag($"兜底恢复前台 结果={NativeMethods.GetForegroundWindow() == target}");
+        }
+        catch (Exception ex)
+        {
+            Program.LogError("恢复粘贴目标焦点", ex);
+        }
+    }
+
+    /// <summary>取窗口标题（诊断日志用）</summary>
+    private static string WindowTitle(IntPtr hwnd)
+    {
+        try
+        {
+            var sb = new System.Text.StringBuilder(128);
+            NativeMethods.GetWindowText(hwnd, sb, sb.Capacity);
+            return sb.ToString();
+        }
+        catch
+        {
+            return "?";
+        }
+    }
+
     // ---------------- 窗口行为 ----------------
+
+    // 非激活显示（ShowActivated=false + WS_EX_NOACTIVATE + WM_MOUSEACTIVATE→MA_NOACTIVATE）：
+    // 同 Win+V 机制，弹窗全程不夺走目标窗口的激活与焦点；键盘由低级钩子喂入，粘贴时直接模拟 Ctrl+V 即可命中。
 
     /// <summary>窗口定位到鼠标下方（物理像素计算，兼容多显示器 DPI）</summary>
     protected override void OnSourceInitialized(EventArgs e)
@@ -880,8 +1065,19 @@ public class ClipboardWindow : Window
         base.OnSourceInitialized(e);
         try
         {
-            NativeMethods.GetCursorPos(out var pt);
             var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+
+            if (_targetHwnd != IntPtr.Zero)
+            {
+                // 非激活窗口：鼠标点击也不夺走目标窗口的激活状态（无目标场景则正常激活便于搜索）
+                var exStyle = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GWL_EXSTYLE).ToInt64();
+                NativeMethods.SetWindowLongPtr(hwnd, NativeMethods.GWL_EXSTYLE,
+                    (IntPtr)(exStyle | NativeMethods.WS_EX_NOACTIVATE | NativeMethods.WS_EX_TOOLWINDOW));
+                // 双保险：WS_EX_NOACTIVATE 之外再拦 WM_MOUSEACTIVATE，任何点击都不激活弹窗
+                System.Windows.Interop.HwndSource.FromHwnd(hwnd)?.AddHook(PanelWndProc);
+            }
+
+            NativeMethods.GetCursorPos(out var pt);
             NativeMethods.GetWindowRect(hwnd, out var rect);
             int w = rect.Right - rect.Left, h = rect.Bottom - rect.Top;
 
@@ -901,8 +1097,567 @@ public class ClipboardWindow : Window
         }
 
         RebuildList();
-        _searchBox.Focus();
-        _searchBox.CaretIndex = 0;
+        _selfHwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+        if (_targetHwnd == IntPtr.Zero)
+        {
+            _searchBox.Focus(); // 极端：无前台窗口记录，正常激活模式，原生输入路径
+            return;
+        }
+
+        // 键盘输入：低级键盘钩子捕获物理按键喂给搜索框（弹窗不取 Win32 焦点，目标窗口全程保持前台），
+        // 另装低级鼠标钩子检测点击面板外部即关闭（同 Win+V）
+        InstallHooks();
+
+        // 关闭哨兵：非激活窗口不会触发 OnDeactivated，轮询检测前台离开"粘贴目标或弹窗自身"即关闭。
+        // 须豁免弹窗自身：IME 模式激活弹窗期间前台是弹窗，不能误判为用户切换窗口
+        _closeGuard = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(200) };
+        _closeGuard.Tick += (_, _) =>
+        {
+            if (_closed) return;
+            var fore = NativeMethods.GetForegroundWindow();
+            if (fore != _targetHwnd && fore != _selfHwnd)
+            {
+                Program.LogDiag($"哨兵关窗 前台=0x{fore:X} 目标=0x{_targetHwnd:X} 弹窗=0x{_selfHwnd:X}");
+                UninstallHooks();
+                DetachFromTarget(); // 用户已切到其他窗口：不归还焦点以免抢回前台，仅解除挂接
+                Close();
+            }
+        };
+        _closeGuard.Start();
+    }
+
+    /// <summary>面板窗口过程：点击不激活（保持目标窗口前台）</summary>
+    private IntPtr PanelWndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == (int)NativeMethods.WM_MOUSEACTIVATE && _targetHwnd != IntPtr.Zero)
+        {
+            handled = true;
+            return (IntPtr)NativeMethods.MA_NOACTIVATE;
+        }
+        return IntPtr.Zero;
+    }
+
+    // ---------------- 低级钩子：非激活窗口的键盘/鼠标输入 ----------------
+
+    /// <summary>安装低级键盘/鼠标钩子（UI 线程装，回调须经本线程消息循环分发）</summary>
+    private void InstallHooks()
+    {
+        try
+        {
+            _targetThreadId = NativeMethods.GetWindowThreadProcessId(_targetHwnd, out _);
+            // 种子修饰键状态：装钩子前的物理状态仍准确（之后被吞的键 GetAsyncKeyState 不再更新）
+            _modCtrl = KeyIsDown(NativeMethods.VK_CONTROL);
+            _modShift = KeyIsDown(NativeMethods.VK_LSHIFT) || KeyIsDown(NativeMethods.VK_RSHIFT);
+            _modAlt = KeyIsDown(NativeMethods.VK_MENU);
+
+            var hMod = NativeMethods.GetModuleHandle(null);
+            _keyHookProc = KeyHookProc;
+            _mouseHookProc = MouseHookProc;
+            _keyHook = NativeMethods.SetWindowsHookEx(NativeMethods.WH_KEYBOARD_LL, _keyHookProc, hMod, 0);
+            _mouseHook = NativeMethods.SetWindowsHookEx(NativeMethods.WH_MOUSE_LL, _mouseHookProc, hMod, 0);
+            Program.LogDiag($"低级钩子安装 键盘=0x{_keyHook:X} 鼠标=0x{_mouseHook:X} 目标tid={_targetThreadId} 前台=0x{NativeMethods.GetForegroundWindow():X}");
+        }
+        catch (Exception ex)
+        {
+            Program.LogError("剪贴板弹窗钩子", ex);
+        }
+    }
+
+    /// <summary>卸载低级钩子（幂等；粘贴前、IME 模式、关窗时调用）</summary>
+    private void UninstallHooks()
+    {
+        if (_keyHook != IntPtr.Zero)
+        {
+            NativeMethods.UnhookWindowsHookEx(_keyHook);
+            _keyHook = IntPtr.Zero;
+        }
+        if (_mouseHook != IntPtr.Zero)
+        {
+            NativeMethods.UnhookWindowsHookEx(_mouseHook);
+            _mouseHook = IntPtr.Zero;
+        }
+        _keyHookProc = null;
+        _mouseHookProc = null;
+    }
+
+    private static bool KeyIsDown(byte vk) => (NativeMethods.GetAsyncKeyState(vk) & 0x8000) != 0;
+
+    /// <summary>修饰键（含左右变体）放行系统：保持全局 Alt+Tab 等组合可用，自身状态在钩子里另行维护</summary>
+    private static bool IsModifierKey(uint vk) => vk == NativeMethods.VK_SHIFT || vk == NativeMethods.VK_LSHIFT ||
+        vk == NativeMethods.VK_RSHIFT || vk == NativeMethods.VK_CONTROL || vk == NativeMethods.VK_LCONTROL ||
+        vk == NativeMethods.VK_RCONTROL || vk == NativeMethods.VK_MENU || vk == NativeMethods.VK_LMENU ||
+        vk == NativeMethods.VK_RMENU;
+
+    /// <summary>
+    /// 低级键盘钩子回调：按键投递给面板窗口线程处理，不让其进入目标窗口。
+    /// 放行：注入键（自己的 Ctrl+V）、Win 键 / Tab（Alt+Tab 等系统组合）、修饰键（维护全局状态一致性）。
+    /// </summary>
+    private IntPtr KeyHookProc(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode == NativeMethods.HC_ACTION && !_imeMode && !_closed)
+        {
+            var k = System.Runtime.InteropServices.Marshal.PtrToStructure<NativeMethods.KBDLLHOOKSTRUCT>(lParam);
+            // 自己注入的 Ctrl+V 必须放行，否则粘贴会被自己吃掉
+            if ((k.flags & NativeMethods.LLKHF_INJECTED) == 0)
+            {
+                uint msg = (uint)wParam;
+                bool down = msg == NativeMethods.WM_KEYDOWN || msg == NativeMethods.WM_SYSKEYDOWN;
+                bool up = msg == NativeMethods.WM_KEYUP || msg == NativeMethods.WM_SYSKEYUP;
+                if (down || up)
+                {
+                    // 吞键后 GetAsyncKeyState 不再更新，修饰键状态在钩子里自行维护
+                    if (k.vkCode == NativeMethods.VK_CONTROL || k.vkCode == NativeMethods.VK_LCONTROL || k.vkCode == NativeMethods.VK_RCONTROL)
+                        _modCtrl = down;
+                    else if (k.vkCode == NativeMethods.VK_SHIFT || k.vkCode == NativeMethods.VK_LSHIFT || k.vkCode == NativeMethods.VK_RSHIFT)
+                        _modShift = down;
+                    else if (k.vkCode == NativeMethods.VK_MENU || k.vkCode == NativeMethods.VK_LMENU || k.vkCode == NativeMethods.VK_RMENU)
+                        _modAlt = down;
+                }
+
+                // Win 键 / Tab / 修饰键交给系统，其余吞掉（目标窗口收不到这颗键）
+                bool pass = k.vkCode == NativeMethods.VK_LWIN || k.vkCode == NativeMethods.VK_RWIN ||
+                            k.vkCode == NativeMethods.VK_TAB || IsModifierKey(k.vkCode);
+                if (!pass && (down || up))
+                {
+                    if (down)
+                    {
+                        uint vk = k.vkCode, scan = k.scanCode;
+                        Dispatcher.BeginInvoke(() => OnForwardedKey(vk, scan)); // 回调里只投递，不在钩子链上做翻译
+                    }
+                    return (IntPtr)1;
+                }
+            }
+        }
+        return NativeMethods.CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
+    }
+
+    /// <summary>
+    /// 低级鼠标钩子回调：点击落在面板外即关闭面板（不归还焦点），点击继续传给底层窗口（同 Win+V）。
+    /// </summary>
+    private IntPtr MouseHookProc(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode == NativeMethods.HC_ACTION && !_closed)
+        {
+            uint msg = (uint)wParam;
+            if (msg == NativeMethods.WM_LBUTTONDOWN || msg == NativeMethods.WM_RBUTTONDOWN ||
+                msg == NativeMethods.WM_MBUTTONDOWN || msg == NativeMethods.WM_NCLBUTTONDOWN ||
+                msg == NativeMethods.WM_NCRBUTTONDOWN || msg == NativeMethods.WM_NCMBUTTONDOWN)
+            {
+                var m = System.Runtime.InteropServices.Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
+                if (!IsInsidePanel(m.pt))
+                {
+                    UninstallHooks(); // 立即卸载，避免关闭过程中的点击再排队关窗
+                    Dispatcher.BeginInvoke(() =>
+                    {
+                        if (_closed) return;
+                        // 点击的目标窗口会自行接管前台，无需归还焦点
+                        DetachFromTarget();
+                        Close();
+                    });
+                }
+            }
+        }
+        return NativeMethods.CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
+    }
+
+    /// <summary>点击是否落在面板可视区域内（DWM 紧凑边界排除阴影边距；同进程弹层视作内部）</summary>
+    private bool IsInsidePanel(NativeMethods.POINT pt)
+    {
+        try
+        {
+            var hit = NativeMethods.WindowFromPoint(pt);
+            if (hit != IntPtr.Zero &&
+                NativeMethods.GetWindowThreadProcessId(hit, out var pid) != 0 &&
+                pid == Environment.ProcessId)
+                return true; // DatePicker 日历等同进程弹层
+
+            // DWM 扩展边界不含透明阴影边距；失败回退 GetWindowRect
+            if (NativeMethods.DwmGetWindowAttribute(_selfHwnd, NativeMethods.DWMWA_EXTENDED_FRAME_BOUNDS,
+                    out var r, System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.RECT>()) != 0)
+                NativeMethods.GetWindowRect(_selfHwnd, out r);
+            return pt.X >= r.Left && pt.X < r.Right && pt.Y >= r.Top && pt.Y < r.Bottom;
+        }
+        catch
+        {
+            return true; // 查询失败宁可不关
+        }
+    }
+
+    // ---------------- 按键分发与搜索框编辑（无焦点手动喂键） ----------------
+
+    /// <summary>
+    /// 钩子转发来的按键：面板级按键（Esc/回车/列表导航）分发，其余翻译成字符或编辑操作喂给搜索框。
+    /// 搜索框不持有 Win32 焦点，一切编辑状态靠 CaretIndex/Selection 手动维护。
+    /// </summary>
+    private void OnForwardedKey(uint vk, uint scan)
+    {
+        if (_closed || _imeMode) return;
+
+        switch (vk)
+        {
+            case NativeMethods.VK_ESCAPE:
+                if (_selectMode) ExitSelectMode(); // 多选模式下 Esc 先退出，再次按才关窗
+                else Close(); // 非激活模式下从未动过目标焦点，直接关闭即可
+                return;
+            case NativeMethods.VK_RETURN:
+                PasteFromKeyboard();
+                return;
+            case NativeMethods.VK_UP:
+                MoveSel(-1);
+                return;
+            case NativeMethods.VK_DOWN:
+                MoveSel(1);
+                return;
+        }
+
+        // Ctrl / Alt 组合：热键重按、编辑快捷键就地处理，其余吞掉（避免漏给目标窗口）
+        if (_modCtrl || _modAlt)
+        {
+            if (_modCtrl && _modAlt && vk == 'V')
+            {
+                EnterImeMode(); // 热键重按：激活弹窗聚焦搜索框
+                return;
+            }
+            if (_modCtrl && !_modAlt)
+            {
+                if (vk == 'A') _searchBox.SelectAll();
+                else if (vk == 'V')
+                {
+                    // 把最新剪贴板文本粘进搜索框（过滤常用）
+                    var latest = _clipboard.Entries.FirstOrDefault()?.Text;
+                    if (!string.IsNullOrEmpty(latest)) InsertAtCaret(latest);
+                }
+                else if (vk == NativeMethods.VK_BACK) DeleteBackward(true); // Ctrl+Backspace 删一词
+            }
+            return;
+        }
+
+        switch (vk)
+        {
+            case NativeMethods.VK_BACK: DeleteBackward(false); return;
+            case NativeMethods.VK_DELETE: DeleteForward(); return;
+            case NativeMethods.VK_LEFT:
+            case NativeMethods.VK_RIGHT:
+            case NativeMethods.VK_HOME:
+            case NativeMethods.VK_END: MoveCaretKey(vk); return;
+        }
+
+        // 字符键：用目标线程的键盘布局翻译（含 Shift 状态），插入光标处
+        var state = new byte[256];
+        NativeMethods.GetKeyboardState(state); // 锁定键状态（大小写等）
+        SetKeyState(ref state[NativeMethods.VK_SHIFT], _modShift);
+        SetKeyState(ref state[NativeMethods.VK_LSHIFT], _modShift);
+        SetKeyState(ref state[NativeMethods.VK_CONTROL], false);
+        SetKeyState(ref state[NativeMethods.VK_MENU], false);
+        var hkl = NativeMethods.GetKeyboardLayout(_targetThreadId);
+        var buf = new char[8];
+        int n = NativeMethods.ToUnicodeEx(vk, scan, state, buf, buf.Length, 0, hkl);
+        if (n > 0) InsertAtCaret(new string(buf, 0, n));
+    }
+
+    private static void SetKeyState(ref byte state, bool down)
+    {
+        if (down) state |= 0x80;
+        else state &= 0x7F;
+    }
+
+    /// <summary>点击搜索框时把光标放到点击处（无 Win32 焦点，TextBox 不会自己落光标）</summary>
+    private void PlaceSearchCaret(Point pos)
+    {
+        var text = _searchBox.Text ?? "";
+        if (text.Length == 0)
+        {
+            _searchBox.CaretIndex = 0;
+            return;
+        }
+
+        int index = _searchBox.GetCharacterIndexFromPoint(pos, true);
+        if (index < 0)
+        {
+            _searchBox.CaretIndex = text.Length;
+            return;
+        }
+
+        try
+        {
+            var rect = _searchBox.GetRectFromCharacterIndex(index);
+            if (!rect.IsEmpty && pos.X > rect.X + rect.Width / 2)
+                index++;
+        }
+        catch
+        {
+            // 布局未完成时用最近点
+        }
+
+        _searchBox.CaretIndex = Math.Clamp(index, 0, text.Length);
+    }
+
+    /// <summary>钩子模式下绘制搜索光标；IME / 无粘贴目标时用系统光标，这里隐藏</summary>
+    private void UpdateSearchCaret()
+    {
+        if (_searchCaret == null || _closed) return;
+        bool show = _targetHwnd != IntPtr.Zero && !_imeMode && _searchBox.SelectionLength == 0;
+        if (!show || _searchCaret.Parent is not UIElement parent)
+        {
+            _searchCaret.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        Rect rect;
+        Point topLeft;
+        try
+        {
+            rect = _searchBox.GetRectFromCharacterIndex(_searchBox.CaretIndex);
+            if (rect.IsEmpty)
+            {
+                _searchCaret.Visibility = Visibility.Collapsed;
+                return;
+            }
+            topLeft = _searchBox.TranslatePoint(new Point(rect.X, rect.Y), parent);
+        }
+        catch
+        {
+            _searchCaret.Visibility = Visibility.Collapsed;
+            return;
+        }
+        _searchCaret.Height = Math.Max(1, rect.Height);
+        _searchCaret.Margin = new Thickness(topLeft.X, topLeft.Y, 0, 0);
+        _searchCaret.Opacity = 1;
+        _caretPhase = true;
+        _searchCaret.Visibility = Visibility.Visible;
+
+        if (_caretBlink == null)
+        {
+            _caretBlink = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(530) };
+            _caretBlink.Tick += (_, _) =>
+            {
+                if (_searchCaret == null || _searchCaret.Visibility != Visibility.Visible) return;
+                _caretPhase = !_caretPhase;
+                _searchCaret.Opacity = _caretPhase ? 1 : 0;
+            };
+            _caretBlink.Start();
+        }
+    }
+
+    /// <summary>替换选区插入文本，光标落在插入文本之后</summary>
+    private void InsertAtCaret(string text)
+    {
+        int start = _searchBox.SelectionStart;
+        _searchBox.SelectedText = text;
+        _searchBox.CaretIndex = start + text.Length;
+    }
+
+    /// <summary>退格删除：先删选区；无选区删光标前一个字符（word=true 按词删）</summary>
+    private void DeleteBackward(bool word)
+    {
+        if (_searchBox.SelectionLength > 0)
+        {
+            _searchBox.SelectedText = "";
+            return;
+        }
+        int i = _searchBox.CaretIndex;
+        if (i == 0) return;
+        int j = word ? WordBound(_searchBox.Text, i, -1) : i - 1;
+        _searchBox.Select(j, i - j);
+        _searchBox.SelectedText = "";
+    }
+
+    /// <summary>Delete 删除：先删选区；无选区删光标后一个字符</summary>
+    private void DeleteForward()
+    {
+        if (_searchBox.SelectionLength > 0)
+        {
+            _searchBox.SelectedText = "";
+            return;
+        }
+        int i = _searchBox.CaretIndex;
+        if (i >= _searchBox.Text.Length) return;
+        _searchBox.Select(i, 1);
+        _searchBox.SelectedText = "";
+    }
+
+    /// <summary>左右/Home/End 移动光标：Ctrl 按词跳，Shift 扩选；有选区先塌缩到边界</summary>
+    private void MoveCaretKey(uint vk)
+    {
+        var text = _searchBox.Text;
+        int selStart = _searchBox.SelectionStart, selLen = _searchBox.SelectionLength;
+        int caret = _searchBox.CaretIndex;
+
+        if (!_modShift && selLen > 0)
+        {
+            // 无 Shift 时先塌缩到选区边界（再按一次才移动）
+            _searchBox.CaretIndex = vk == NativeMethods.VK_LEFT || vk == NativeMethods.VK_HOME ? selStart : selStart + selLen;
+            return;
+        }
+
+        int target = vk switch
+        {
+            NativeMethods.VK_HOME => 0,
+            NativeMethods.VK_END => text.Length,
+            _ => _modCtrl
+                ? (vk == NativeMethods.VK_LEFT ? WordBound(text, caret, -1) : WordBound(text, caret, 1))
+                : caret + (vk == NativeMethods.VK_LEFT ? -1 : 1),
+        };
+        target = Math.Max(0, Math.Min(text.Length, target));
+
+        if (_modShift)
+        {
+            // 扩选：锚点取原选区靠光标的另一端
+            int anchor = caret == selStart ? selStart + selLen : selStart;
+            _searchBox.Select(Math.Min(anchor, target), Math.Abs(anchor - target));
+        }
+        else
+        {
+            _searchBox.CaretIndex = target;
+        }
+    }
+
+    /// <summary>词边界（Ctrl+左右跳词）：以空格分词，dir=-1 向左 / 1 向右</summary>
+    private static int WordBound(string text, int from, int dir)
+    {
+        int i = from;
+        if (dir < 0)
+        {
+            while (i > 0 && char.IsWhiteSpace(text[i - 1])) i--;
+            while (i > 0 && !char.IsWhiteSpace(text[i - 1])) i--;
+        }
+        else
+        {
+            while (i < text.Length && !char.IsWhiteSpace(text[i])) i++;
+            while (i < text.Length && char.IsWhiteSpace(text[i])) i++;
+        }
+        return i;
+    }
+
+    // ---------------- 键盘列表导航（同 Win+V 上下键选条目） ----------------
+
+    /// <summary>上下键移动高亮条目并滚动可视</summary>
+    private void MoveSel(int delta)
+    {
+        if (_selectMode || _visibleItems.Count == 0) return;
+        int next = _selIndex < 0
+            ? (delta > 0 ? 0 : _visibleItems.Count - 1)
+            : Math.Max(0, Math.Min(_visibleItems.Count - 1, _selIndex + delta));
+        if (next == _selIndex) return;
+        _selIndex = next;
+        ApplySelHighlight();
+        if (next >= 0 && next < _itemBorders.Count) _itemBorders[next].BringIntoView();
+    }
+
+    /// <summary>刷新键盘高亮外观（选中项复用悬停配色）</summary>
+    private void ApplySelHighlight()
+    {
+        for (int i = 0; i < _itemBorders.Count; i++)
+        {
+            bool sel = i == _selIndex;
+            _itemBorders[i].Background = sel ? ItemHoverBg : Brushes.White;
+            _itemBorders[i].BorderBrush = sel ? HoverBorder : NormalBorder;
+        }
+    }
+
+    /// <summary>回车：粘贴当前键盘高亮条目（无高亮时取第一条，多选模式下禁用）</summary>
+    private void PasteFromKeyboard()
+    {
+        if (_selectMode || _visibleItems.Count == 0) return;
+        int idx = _selIndex >= 0 && _selIndex < _visibleItems.Count ? _selIndex : 0;
+        PasteAndClose(_visibleItems[idx]);
+    }
+
+    // ---------------- IME 模式（再次按下热键后真正激活，支持输入法） ----------------
+
+    /// <summary>弹窗已开时再按热键：激活弹窗聚焦搜索框（输入法需要真实焦点）</summary>
+    public void FocusWindow()
+    {
+        if (_closed) return;
+        EnterImeMode();
+    }
+
+    /// <summary>
+    /// 激活弹窗进入 IME 模式：输入法组合窗口只能挂到真正拥有焦点的 HWND。
+    /// 仅再次按下热键时进入；点击搜索框不走这里，避免目标窗口失焦。
+    /// 激活会暂时夺走目标前台（标题栏变灰），粘贴/Esc 时按"前台→焦点→解挂"时序归还。
+    /// </summary>
+    private void EnterImeMode()
+    {
+        if (_closed || _imeMode) return;
+        _imeMode = true;
+        UninstallHooks(); // 真实键盘直达弹窗，钩子必须卸掉（否则吞掉 IME 按键）
+        try
+        {
+            var appThread = NativeMethods.GetCurrentThreadId();
+            if (!_attached)
+            {
+                var targetThread = NativeMethods.GetWindowThreadProcessId(_targetHwnd, out _);
+                if (targetThread != 0 && targetThread != appThread)
+                {
+                    _targetThreadId = targetThread;
+                    _attached = NativeMethods.AttachThreadInput(appThread, targetThread, true); // 挂接中激活可绕前台锁
+                }
+            }
+            if (_attached) NativeMethods.SetForegroundWindow(_selfHwnd);
+            else Activate();
+            _searchBox.Focusable = true; // 钩子模式下为 false，避免点击搜索框激活弹窗
+            _searchBox.Focus();
+            UpdateSearchCaret();
+            Program.LogDiag($"IME 模式激活 前台=0x{NativeMethods.GetForegroundWindow():X} 弹窗=0x{_selfHwnd:X} 即前台={NativeMethods.GetForegroundWindow() == _selfHwnd}");
+        }
+        catch (Exception ex)
+        {
+            Program.LogError("剪贴板弹窗激活", ex);
+        }
+    }
+
+    /// <summary>解除与目标线程的挂接（归还焦点后调用；OnClosed 兜底）</summary>
+    private void DetachFromTarget()
+    {
+        if (!_attached) return;
+        _attached = false;
+        try
+        {
+            NativeMethods.AttachThreadInput(NativeMethods.GetCurrentThreadId(), _targetThreadId, false);
+        }
+        catch (Exception ex)
+        {
+            Program.LogError("解除目标线程挂接", ex);
+        }
+    }
+
+    /// <summary>
+    /// 归还键盘焦点到弹窗打开时的输入框，再解除挂接（IME 模式下 Esc 等不粘贴的关闭路径共用）。
+    /// 钩子模式下从未动过目标焦点，仅解除挂接即可。
+    /// </summary>
+    private void RestoreFocusAndDetach()
+    {
+        try
+        {
+            var focusTarget = NativeMethods.IsWindow(_focusHwnd) ? _focusHwnd : _targetHwnd;
+            if (_imeMode)
+            {
+                // 与粘贴同款时序：先切前台再落焦点，避免挂接解除时焦点归零
+                var appThread = NativeMethods.GetCurrentThreadId();
+                var targetThread = NativeMethods.GetWindowThreadProcessId(_targetHwnd, out _);
+                if (targetThread != 0 && targetThread != appThread)
+                {
+                    if (!_attached)
+                    {
+                        _targetThreadId = targetThread;
+                        _attached = NativeMethods.AttachThreadInput(appThread, targetThread, true);
+                    }
+                    NativeMethods.SetForegroundWindow(_targetHwnd);
+                    NativeMethods.SetFocus(focusTarget);
+                }
+                else
+                {
+                    NativeMethods.SetForegroundWindow(_targetHwnd);
+                    NativeMethods.SetFocus(focusTarget);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Program.LogError("归还焦点", ex);
+        }
+        DetachFromTarget();
     }
 
     protected override void OnPreviewKeyDown(KeyEventArgs e)
@@ -910,7 +1665,22 @@ public class ClipboardWindow : Window
         if (e.Key == Key.Escape)
         {
             if (_selectMode) ExitSelectMode(); // 多选模式下 Esc 先退出，再次按才关窗
-            else Close();
+            else
+            {
+                RestoreFocusAndDetach(); // IME 模式归还焦点到原输入框；钩子模式无操作
+                Close();
+            }
+            e.Handled = true;
+        }
+        // IME 模式下的列表导航与钩子模式保持一致
+        else if (e.Key == Key.Up)
+        {
+            MoveSel(-1);
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Down)
+        {
+            MoveSel(1);
             e.Handled = true;
         }
         base.OnPreviewKeyDown(e);
@@ -919,13 +1689,19 @@ public class ClipboardWindow : Window
     protected override void OnDeactivated(EventArgs e)
     {
         base.OnDeactivated(e);
-        // 点击弹窗外部：关闭（同 Win+V 行为）
+        // 点击弹窗外部：关闭（IME/正常激活模式触发；钩子模式由鼠标钩子与哨兵兜底）
+        UninstallHooks();
+        RestoreFocusAndDetach();
         Close();
     }
 
     protected override void OnClosed(EventArgs e)
     {
         _closed = true;
+        _closeGuard?.Stop();
+        _caretBlink?.Stop();
+        UninstallHooks(); // 兜底：任何路径漏掉的钩子都在此卸载
+        DetachFromTarget(); // 兜底：任何路径漏掉的挂接都在此解除
         _thumbQueue.Clear();
         _clipboard.Changed -= OnEntriesChanged;
         base.OnClosed(e);

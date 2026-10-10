@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
@@ -66,6 +67,8 @@ internal sealed class RecordingsPanel : Grid
 	private readonly Dictionary<string, Grid> _cards = new Dictionary<string, Grid>();
 
 	private Button _multiSelectBtn;
+
+	private Button _exportSelectedBtn;
 
 	private Button _deleteSelectedBtn;
 
@@ -276,6 +279,22 @@ internal sealed class RecordingsPanel : Grid
 			Margin = new Thickness(0.0, 0.0, 8.0, 0.0),
 			Visibility = Visibility.Collapsed
 		};
+		_exportSelectedBtn = new Button
+		{
+			Height = 32.0,
+			Margin = new Thickness(0.0, 0.0, 6.0, 0.0),
+			Padding = new Thickness(19.0, 0.0, 19.0, 0.0),
+			Background = Brushes.Transparent,
+			Cursor = Cursors.Hand,
+			ToolTip = "把所选录屏打包导出为 zip 压缩包",
+			Template = UiKit.ButtonTemplate(9, "#EFEDFB", "#E4E1F7"),
+			Content = UiKit.ActionContent("M12 4v10.5 M7.8 10.3 12 14.5l4.2-4.2 M5 19.5h14", IconStroke, "导出所选", TextPrimary),
+			Visibility = Visibility.Collapsed
+		};
+		_exportSelectedBtn.Click += delegate
+		{
+			ExportSelected();
+		};
 		_deleteSelectedBtn = new Button
 		{
 			Height = 32.0,
@@ -323,6 +342,7 @@ internal sealed class RecordingsPanel : Grid
 		};
 		stackPanel2.Children.Add(_multiSelectBtn);
 		stackPanel2.Children.Add(_selectedInfo);
+		stackPanel2.Children.Add(_exportSelectedBtn);
 		stackPanel2.Children.Add(_deleteSelectedBtn);
 		stackPanel2.Children.Add(button);
 		stackPanel2.Children.Add(button3);
@@ -513,6 +533,7 @@ internal sealed class RecordingsPanel : Grid
 		_multiSelectBtn.Template = (on ? UiKit.ButtonTemplate(9, "#6B59E4", "#5F4FD6") : UiKit.ButtonTemplate(9, "#EFEDFB", "#E4E1F7"));
 		_multiSelectBtn.Content = (on ? UiKit.ActionContent("M7.5 4.5h9A3 3 0 0 1 19.5 7.5v9a3 3 0 0 1-3 3h-9a3 3 0 0 1-3-3v-9a3 3 0 0 1 3-3z M8.7 12.2l2.3 2.3 4.5-5", Brushes.White, "退出多选", Brushes.White) : UiKit.ActionContent("M7.5 4.5h9A3 3 0 0 1 19.5 7.5v9a3 3 0 0 1-3 3h-9a3 3 0 0 1-3-3v-9a3 3 0 0 1 3-3z M8.7 12.2l2.3 2.3 4.5-5", IconStroke, "多选", TextPrimary));
 		_deleteSelectedBtn.Visibility = ((!on) ? Visibility.Collapsed : Visibility.Visible);
+		_exportSelectedBtn.Visibility = ((!on) ? Visibility.Collapsed : Visibility.Visible);
 		if (on)
 		{
 			_selectedIds.Clear();
@@ -565,6 +586,7 @@ internal sealed class RecordingsPanel : Grid
 		_selectedInfo.Text = $"已选 {_selectedIds.Count} 项";
 		_selectedInfo.Visibility = ((!_multiSelect) ? Visibility.Collapsed : Visibility.Visible);
 		_deleteSelectedBtn.IsEnabled = _selectedIds.Count > 0;
+		_exportSelectedBtn.IsEnabled = _selectedIds.Count > 0;
 	}
 
 	private void DeleteSelected()
@@ -576,6 +598,62 @@ internal sealed class RecordingsPanel : Grid
 		foreach (RecordingEntry item in _history.Entries.Where((RecordingEntry e) => _selectedIds.Contains(e.Id)).ToList())
 		{
 			_history.Delete(item);
+		}
+	}
+
+	/// <summary>把所选录屏打包导出为 zip（后台打包，期间禁用面板防误操作）</summary>
+	private async void ExportSelected()
+	{
+		List<RecordingEntry> entries = _history.Entries.Where((RecordingEntry e) => _selectedIds.Contains(e.Id)).ToList();
+		if (entries.Count == 0)
+		{
+			return;
+		}
+		Microsoft.Win32.SaveFileDialog dlg = new Microsoft.Win32.SaveFileDialog
+		{
+			Title = "导出所选录屏",
+			Filter = "Zip 压缩包 (*.zip)|*.zip",
+			FileName = $"录屏导出_{DateTime.Now:yyyyMMdd_HHmmss}.zip"
+		};
+		if (dlg.ShowDialog(Window.GetWindow(this)) != true)
+		{
+			return;
+		}
+		try
+		{
+			IsEnabled = false;
+			int exported = await Task.Run(() => _history.ExportZip(entries, dlg.FileName));
+			MessageBox.Show(Window.GetWindow(this), (exported == entries.Count) ? $"已导出 {exported} 条录屏：\n{dlg.FileName}" : $"已导出 {exported} / {entries.Count} 条（其余视频文件已丢失）：\n{dlg.FileName}", "导出完成", MessageBoxButton.OK, MessageBoxImage.Information);
+		}
+		catch (Exception ex)
+		{
+			Program.LogError("批量导出录屏", ex);
+			MessageBox.Show(Window.GetWindow(this), $"导出失败：\n{ex.Message}", "批量导出", MessageBoxButton.OK, MessageBoxImage.Warning);
+		}
+		finally
+		{
+			IsEnabled = true;
+		}
+	}
+
+	/// <summary>复制视频文件到剪贴板（与资源管理器 Ctrl+C 相同语义，可粘贴到任意位置）</summary>
+	private void CopyEntry(RecordingEntry entry)
+	{
+		string path = _history.FilePath(entry);
+		if (!File.Exists(path))
+		{
+			MessageBox.Show(Window.GetWindow(this), "视频文件已不存在。", "复制录屏", MessageBoxButton.OK, MessageBoxImage.Information);
+			return;
+		}
+		try
+		{
+			System.Collections.Specialized.StringCollection files = new System.Collections.Specialized.StringCollection();
+			files.Add(path);
+			Clipboard.SetFileDropList(files);
+		}
+		catch (Exception ex)
+		{
+			Program.LogError("复制录屏文件", ex);
 		}
 	}
 
@@ -898,6 +976,20 @@ internal sealed class RecordingsPanel : Grid
 			UiKit.AnimateDouble((TranslateTransform)card.RenderTransform, TranslateTransform.YProperty, 0.0);
 			UiKit.AnimateDouble(shadow, DropShadowEffect.OpacityProperty, 0.09);
 		};
+		MenuItem copyItem = new MenuItem
+		{
+			Header = "复制视频文件"
+		};
+		copyItem.Click += delegate
+		{
+			CopyEntry(entry2);
+		};
+		card.ContextMenu = new ContextMenu
+		{
+			Style = UiKit.MenuStyle
+		};
+		card.ContextMenu.Resources.Add(typeof(MenuItem), UiKit.MenuItemStyle);
+		card.ContextMenu.Items.Add(copyItem);
 		card.MouseLeftButtonDown += delegate(object _, MouseButtonEventArgs e)
 		{
 			if (_multiSelect)
