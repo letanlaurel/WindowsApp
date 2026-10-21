@@ -6,6 +6,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using SnipPin.Core.Annotations;
 using SnipPin.Core.Configuration;
+using SnipPin.Ocr;
 
 namespace SnipPin.Core.Services;
 
@@ -28,6 +29,9 @@ public class PinWindow : Window
     private readonly UndoRedoStack _history = new();
     private readonly HistoryService _historyService; // ✓ 写入时生成截图历史记录
     private readonly IPinService _pinService; // ✓ 右键"关闭所有贴图"用
+    private readonly IOcrService _ocrService; // ✓ 右键"提取文字"用
+    private readonly Grid _imageStack;         // 图片+标注层所在栈（OCR 选择覆盖层挂载点）
+    private PinOcrOverlay? _ocrOverlay;        // "选择文字"覆盖层（懒建）
     private Canvas? _annotCanvas;
     private AnnotationToolbar? _toolbar;
     private bool _toolbarVisible;
@@ -71,12 +75,13 @@ public class PinWindow : Window
         Topmost = _alwaysOnTop;
     }
 
-    public PinWindow(BitmapSource image, PinConfig config, HistoryService historyService, IPinService pinService)
+    public PinWindow(BitmapSource image, PinConfig config, HistoryService historyService, IPinService pinService, IOcrService ocrService)
     {
         _config = config;
         _baseImage = image;
         _historyService = historyService;
         _pinService = pinService;
+        _ocrService = ocrService;
         _alwaysOnTop = config.AlwaysOnTop;
 
         // ---- 窗口外观：无边框、置顶、透明背景、可调整 ----
@@ -108,6 +113,7 @@ public class PinWindow : Window
 
         // 图片 + 标注画布叠层（Grid 同格叠加，标注层置于图片之上）
         var imageStack = new Grid();
+        _imageStack = imageStack;
         imageStack.Children.Add(_image);
         _annotCanvas = CreateAnnotationCanvas();
         HookAnnotationCanvas(_annotCanvas);
@@ -150,6 +156,9 @@ public class PinWindow : Window
         // Esc：正在输入文字先提交；标注模式下作废本次标注并收起；否则关闭
         KeyDown += (_, e) =>
         {
+            // 选择文字模式优先处理（Ctrl+C 复制 / Ctrl+A 全选 / Esc 退出）
+            if (_ocrOverlay?.HandleKey(e) == true) return;
+
             if (e.Key == Key.Escape)
             {
                 if (_textInput != null) CommitTextInput();
@@ -196,6 +205,8 @@ public class PinWindow : Window
             _annotCanvas.Width = _image.Width;
             _annotCanvas.Height = _image.Height;
         }
+        // OCR 选择覆盖层随缩放/DPI 重建块布局
+        _ocrOverlay?.Rescale();
     }
 
     private void SetScale(double scale)
@@ -362,7 +373,40 @@ public class PinWindow : Window
         tb.DeleteRequested += DeleteSelected;
         tb.CancelRequested += DiscardSession;
         tb.ConfirmRequested += CommitSession;
+        tb.SelectTextRequested += EnterOcrSelect;
     }
+
+    // ==================== OCR 选择文字模式（企业微信式图上点选复制） ====================
+
+    /// <summary>进入"选择文字"模式：先烘焙未提交标注（保证所见即所得），再识别当前贴图</summary>
+    private void EnterOcrSelect()
+    {
+        if (_toolbarVisible) CommitSession(); // 标注工具条收起并写入，避免与块交互冲突
+        _ocrOverlay ??= new PinOcrOverlay(this, _ocrService);
+        _ocrOverlay.Enter(GetCompositedImage());
+    }
+
+    /// <summary>图片栈（图片 + 标注层 + OCR 覆盖层宿主），供覆盖层挂载</summary>
+    internal Grid ImageHost => _imageStack;
+
+    /// <summary>图片显示尺寸（DIP），OCR 覆盖层据此设定画布尺寸</summary>
+    internal Size ImageHostSize => new(_image.Width, _image.Height);
+
+    /// <summary>底部操作条宿主（与标注工具条同一 Grid 第二行）</summary>
+    internal Grid OverlayBarHost => _root;
+
+    /// <summary>显示系数（DIP / 源图像素），OCR 块物理坐标 → 显示坐标换算用</summary>
+    internal double OcrRenderScale
+    {
+        get
+        {
+            double dpi = VisualTreeHelper.GetDpi(this).DpiScaleX;
+            return _scale / (dpi <= 0 ? 1 : dpi);
+        }
+    }
+
+    /// <summary>让贴图窗口获得键盘焦点（Esc 退出选择模式需要）</summary>
+    internal void FocusPin() => Keyboard.Focus(this);
 
     // 标注画布鼠标事件在构造时统一挂接
     private void HookAnnotationCanvas(Canvas canvas)
@@ -802,6 +846,12 @@ public class PinWindow : Window
         var copy = new MenuItem { Header = "复制到剪贴板" };
         copy.Click += (_, _) => Clipboard.SetImage(GetCompositedImage());
 
+        var ocr = new MenuItem { Header = "提取文字（OCR）" };
+        ocr.Click += (_, _) => _ocrService.ExtractAndShow(GetCompositedImage());
+
+        var ocrSelect = new MenuItem { Header = "选择文字（图上点选复制）" };
+        ocrSelect.Click += (_, _) => EnterOcrSelect();
+
         var save = new MenuItem { Header = "另存为..." };
         save.Click += (_, _) => SaveAs();
 
@@ -817,6 +867,8 @@ public class PinWindow : Window
         menu.Items.Add(resetScale);
         menu.Items.Add(new Separator());
         menu.Items.Add(copy);
+        menu.Items.Add(ocr);
+        menu.Items.Add(ocrSelect);
         menu.Items.Add(save);
         menu.Items.Add(new Separator());
         menu.Items.Add(close);

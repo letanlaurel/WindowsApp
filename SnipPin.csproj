@@ -37,6 +37,29 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="8.0.1" />
     <!-- WPF 托盘图标（成熟开源组件） -->
     <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="1.1.0" />
+    <!-- 本地离线 OCR（onnxruntime 推理，PP-OCRv5 中文模型见 Assets\models） -->
+    <PackageReference Include="RapidOcrNet" Version="4.2.0" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- OCR 模型四件套（det/cls/rec/字典）：显式 Target 复制（Content 在 publish 下只带出部分文件，不可靠） -->
+    <OcrModelFiles Include="Assets\models\zh\**\*.*" />
+  </ItemGroup>
+
+  <!-- 开发调试：模型复制到输出目录，运行时按 exe 旁 models\zh 查找 -->
+  <Target Name="CopyOcrModelsBuild" AfterTargets="Build">
+    <Copy SourceFiles="@(OcrModelFiles)" DestinationFolder="$(TargetDir)models\zh\" SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- 发布：模型复制到发布目录 exe 旁（同 RapidOcrNet.targets 的模式） -->
+  <Target Name="CopyOcrModelsPublish" AfterTargets="Publish">
+    <Copy SourceFiles="@(OcrModelFiles)" DestinationFolder="$(PublishDir)models\zh\" SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- RapidOcrNet 的 nuget targets 会把自带 latin 模型复制到发布目录 models\v5（约 21MB，本项目不用），
+       依赖其内部 Target 名 CopyModelsPublish，升级包版本时需复核此 Target 是否仍存在 -->
+  <Target Name="RemoveUnusedLatinModels" AfterTargets="CopyModelsPublish">
+    <RemoveDir Directories="$(PublishDir)models\v5\" />
+  </Target>
 
 </Project>

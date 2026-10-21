@@ -15,6 +15,7 @@ public class CaptureService : ICaptureService
     private readonly IStorageService _storage;
     private readonly ConfigService _config;
     private readonly HistoryService _history;
+    private readonly IOcrService _ocr;
     private readonly ILogger<CaptureService> _logger;
 
     public CaptureService(
@@ -22,12 +23,14 @@ public class CaptureService : ICaptureService
         IStorageService storage,
         ConfigService config,
         HistoryService history,
+        IOcrService ocr,
         ILogger<CaptureService> logger)
     {
         _pinService = pinService;
         _storage = storage;
         _config = config;
         _history = history;
+        _ocr = ocr;
         _logger = logger;
     }
 
@@ -109,6 +112,9 @@ public class CaptureService : ICaptureService
                 CloseAll();
                 _logger.LogInformation("截图已取消");
             };
+
+            // 提取文字：仅识别展示，不结束截图会话（overlay 保持打开）
+            overlay.OcrRequested += img => _ocr.ExtractAndShow(img);
 
             overlays.Add(overlay);
         }

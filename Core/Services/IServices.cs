@@ -47,3 +47,21 @@ public interface IStorageService
     /// <summary>复制到剪贴板</summary>
     void CopyToClipboard(BitmapSource image);
 }
+
+/// <summary>OCR 识别出的单字/单词（Box 为源图像素坐标的轴对齐外接矩形）</summary>
+public sealed record OcrWord(string Text, System.Windows.Rect Box);
+
+/// <summary>OCR 识别出的一行文字（Box 为源图像素坐标；Words 为逐个字框；Score 为行平均置信度）</summary>
+public sealed record OcrTextLine(string Text, System.Windows.Rect Box,
+    IReadOnlyList<OcrWord>? Words = null, float Score = 1f);
+
+/// <summary>OCR 文字识别服务（本地离线推理，无需联网）</summary>
+public interface IOcrService
+{
+    /// <summary>模型文件是否齐备（缺失时仍可调用，会在结果窗中提示）</summary>
+    bool IsAvailable { get; }
+    /// <summary>识别图中全部文字并弹出结果浮窗（异步执行，不阻塞调用方）</summary>
+    void ExtractAndShow(BitmapSource image);
+    /// <summary>识别并返回文本行（含位置，供在图上渲染可交互文字块）</summary>
+    Task<IReadOnlyList<OcrTextLine>> RecognizeLinesAsync(BitmapSource image);
+}

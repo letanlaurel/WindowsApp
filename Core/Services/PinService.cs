@@ -14,6 +14,7 @@ public class PinService : IPinService
 {
     private readonly ConfigService _config;
     private readonly HistoryService _history; // 贴图标注完成时生成截图历史
+    private readonly IOcrService _ocr; // 贴图右键"提取文字"
     private readonly List<PinWindow> _pins = new();
 
     private static readonly string SessionDir = Path.Combine(Program.DataDir, "session");
@@ -21,17 +22,18 @@ public class PinService : IPinService
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    public PinService(ConfigService config, HistoryService history)
+    public PinService(ConfigService config, HistoryService history, IOcrService ocr)
     {
         _config = config;
         _history = history;
+        _ocr = ocr;
     }
 
     public IReadOnlyList<PinWindow> Pins => _pins;
 
     public void Pin(BitmapSource image, Point? position = null)
     {
-        var win = new PinWindow(image, _config.Config.Pin, _history, this);
+        var win = new PinWindow(image, _config.Config.Pin, _history, this, _ocr);
 
         if (position.HasValue)
         {
@@ -89,7 +91,7 @@ public class PinService : IPinService
                 img.EndInit();
                 img.Freeze();
 
-                var win = new PinWindow(img, _config.Config.Pin, _history, this);
+                var win = new PinWindow(img, _config.Config.Pin, _history, this, _ocr);
                 win.RestoreState(st);
                 win.Left = st.Left;
                 win.Top = st.Top;

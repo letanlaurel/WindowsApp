@@ -39,6 +39,10 @@ public class AnnotationToolbar : Border
     public event Action? PinRequested;
     public event Action? SaveRequested;
     public event Action? CopyRequested;
+    /// <summary>提取图中文字（OCR，不结束标注会话）</summary>
+    public event Action? OcrRequested;
+    /// <summary>进入"选择文字"模式（仅贴图内嵌工具条显示该按钮）</summary>
+    public event Action? SelectTextRequested;
     public event Action? CancelRequested;
     public event Action? ConfirmRequested;
 
@@ -116,6 +120,13 @@ public class AnnotationToolbar : Border
         panel.Children.Add(ActionButton("↷", "重做", () => RedoRequested?.Invoke()));
         panel.Children.Add(ActionButton("🗑", "删除选中元素", () => DeleteRequested?.Invoke()));
 
+        // ---- 选择文字（贴图内嵌工具条专用；截图悬浮条走输出区的 🔤 识别复制） ----
+        if (!_showOutputActions)
+        {
+            panel.Children.Add(Divider());
+            panel.Children.Add(ActionButton("🔤", "选择文字（OCR）", () => SelectTextRequested?.Invoke()));
+        }
+
         // ---- 输出动作 ----
         if (_showOutputActions)
         {
@@ -123,6 +134,7 @@ public class AnnotationToolbar : Border
             panel.Children.Add(ActionButton("📌", "钉住", () => PinRequested?.Invoke()));
             panel.Children.Add(ActionButton("💾", "保存", () => SaveRequested?.Invoke()));
             panel.Children.Add(ActionButton("📋", "复制", () => CopyRequested?.Invoke()));
+            panel.Children.Add(ActionButton("🔤", "提取文字（不结束本次标注）", () => OcrRequested?.Invoke()));
         }
 
         // ---- ✕ 作废 / ✓ 写入 ----

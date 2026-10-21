@@ -112,6 +112,8 @@ public class CaptureOverlayWindow : Window
     public event Action<Rect, List<Annotation>, CaptureOutputAction>? Committed;
     /// <summary>用户取消</summary>
     public event Action? Cancelled;
+    /// <summary>用户请求提取图中文字（参数：当前选区+标注的合成图；标注会话不结束）</summary>
+    public event Action<BitmapSource>? OcrRequested;
 
     /// <summary>本屏缩放系数（Dpi/96），供外层把 DIP 选区换算回物理像素</summary>
     public double Scale => _scale;
@@ -475,7 +477,21 @@ public class CaptureOverlayWindow : Window
         tb.PinRequested += () => CommitAction(CaptureOutputAction.Pin);
         tb.SaveRequested += () => CommitAction(CaptureOutputAction.Save);
         tb.CopyRequested += () => CommitAction(CaptureOutputAction.Copy);
+        tb.OcrRequested += OnToolbarOcr;
         tb.CancelRequested += Cancel;
+    }
+
+    /// <summary>提取当前选区文字：实时裁剪（选区可能已移动，不复用 _cropBase 缓存）+ 合成标注后冒泡</summary>
+    private void OnToolbarOcr()
+    {
+        if (!_confirming) return;
+        if (_textInput != null) CommitTextInput(); // 文字标注提交后再合成
+
+        var crop = ScreenCapturer.Crop(_screenImage, SelectionPhysical);
+        var img = _annotations.Count > 0
+            ? AnnotationCompositor.Render(crop, _annotations.ToList())
+            : crop;
+        OcrRequested?.Invoke(img);
     }
 
     /// <summary>工具栏跟随选区：默认在选区下方居中，屏幕放不下则放上方，钳制在屏内</summary>
